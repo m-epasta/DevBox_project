@@ -13,7 +13,16 @@ pub enum ToolError {
     ProcessError(String),   
 
     #[error("Network error happened {0}")]
-    NetworkError(String),   
+    NetworkError(String),
+
+    #[error("Failed to read config file: {0}")]
+    FileRead(#[from] std::io::Error),
+    
+    #[error("Failed to parse YAML: {0}")]
+    ParseError(String),
+    
+    #[error("Config validation failed: {0}")]
+    ValidationError(String),
 
 }
 
