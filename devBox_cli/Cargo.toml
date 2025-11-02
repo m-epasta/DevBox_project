@@ -37,6 +37,10 @@ port_check = "0.1"   # Check if ports are available
 anyhow = "1.0"       # Easy error handling
 thiserror = "1.0"    # Custom error types
 
+log = "0.4"
+env_logger = "0.10"
+color-eyre = "0.6"
+
 [target.'cfg(unix)'.dependencies]
 users = "0.11"       # User information
 

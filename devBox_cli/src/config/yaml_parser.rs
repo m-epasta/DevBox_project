@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use crate:: error::ToolError;
+use log::{error, warn, info, debug, trace};
 
 #[derive(Debug,Deserialize, Serialize)]
 pub struct ProjectConfig {
@@ -59,12 +60,14 @@ pub struct Hooks {
 }
 
 impl ProjectConfig {
-    pub fn from_file(&path: &str) -> Result<Self, ToolError> {
+    pub fn from_file(path: &str) -> Result<Self, ToolError> {
         let content = fs::read_to_string(path)?;
+        info!("Loading project from {}", path);
 
-        let config; ProjectConfig = serde_yaml::from_str(&content)
-            .map_err(|e| ConfigError::ParseError(e.to_string()))?;
-
+        debug!("readed file");
+        let config: ProjectConfig = serde_yaml::from_str(&content)
+            .map_err(|e| ToolError::ParseError(e.to_string()))?;
+        info!("successfully loaded project {}", config.name);
         Ok(config)
     }
 }
