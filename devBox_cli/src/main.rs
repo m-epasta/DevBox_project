@@ -7,12 +7,14 @@ use clap::Parser;
 use log::{error, warn, info, debug, trace};
 
 
-fn main() -> crate::error::Result<()> {
+#[tokio::main]
+async fn main() -> crate::error::Result<()> {
+    env_logger::init();
     let cli = Cli::parse();
-
-    match cli.command {
-        Commands::Start(args) => args.handle()?,
-
-    }
+    
+    // match cli.command {
+    //     Commands::Start(args) => args.handle().await?,
+    // } 
+    // TODO: fix error there
     Ok(())
 }

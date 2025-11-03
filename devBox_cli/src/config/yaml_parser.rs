@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use crate:: error::ToolError;
-use log::{error, warn, info, debug, trace};
+use log::{info, debug};
 
-#[derive(Debug,Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProjectConfig {
     pub name: String,
     pub description: Option<String>,
@@ -13,13 +13,13 @@ pub struct ProjectConfig {
     pub hooks: Option<Hooks>
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Commands {
     pub start: StartCommands
     // add other later
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StartCommands {
     pub dev: String,
     pub test: Option<String>,
@@ -29,12 +29,12 @@ pub struct StartCommands {
     pub services: Option<Services>
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Services {
     pub services: Vec<Service>
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Service {
     pub name: String,
     pub service_type: String,
@@ -44,14 +44,14 @@ pub struct Service {
     pub dependencies: Vec<String>
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Health_check {
     pub type_entry: String,
     pub port: Option<i16>,
     pub http_target: String
 } 
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Hooks {
     pub pre_start: Option<String>,
     pub post_start: Option<String>,

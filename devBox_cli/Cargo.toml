@@ -41,6 +41,8 @@ log = "0.4"
 env_logger = "0.10"
 color-eyre = "0.6"
 
+dotenvy = "0.15"
+
 [target.'cfg(unix)'.dependencies]
 users = "0.11"       # User information
 
