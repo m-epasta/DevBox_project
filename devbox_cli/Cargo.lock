@@ -422,7 +422,6 @@ dependencies = [
  "port_check",
  "reqwest",
  "serde",
- "serde_json",
  "serde_yaml",
  "sysinfo",
  "tempfile",
