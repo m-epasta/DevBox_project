@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use crate::error::Result;
 use std::process::Command;
 use std::path::Path;
-
+// TODO: test and refactor all the templates except nextjs
 // Template data structures
 #[derive(Debug, Clone)]
 struct TemplateFile {
@@ -567,6 +567,70 @@ impl InitArgs {
         }
     }
 
+    fn vue_template(&self) -> Template {
+        Template {
+            name: "vue".to_string(),
+            services: vec!["frontend".to_string()],
+            packages: vec!["nodejs@latest".to_string(), "npm@latest".to_string()],
+            files: vec![
+                TemplateFile {
+                    path: "frontend/package.json".to_string(),
+                    content: VUE_PACKAGE_JSON,
+                },
+                TemplateFile {
+                    path: "frontend/vite.config.ts".to_string(),
+                    content: VUE_VITE_CONFIG,
+                },
+                TemplateFile {
+                    path: "frontend/tsconfig.json".to_string(),
+                    content: VUE_TS_CONFIG,
+                },
+                TemplateFile {
+                    path: "frontend/tsconfig.node.json".to_string(), // ADD THIS
+                    content: VUE_TS_CONFIG_NODE,
+                },
+                TemplateFile {
+                    path: "frontend/index.html".to_string(),
+                    content: VUE_HTML,
+                },
+                TemplateFile {
+                    path: "frontend/src/main.ts".to_string(),
+                    content: VUE_MAIN,
+                },
+                TemplateFile {
+                    path: "frontend/src/App.vue".to_string(),
+                    content: VUE_APP,
+                },
+                TemplateFile {
+                    path: "frontend/src/components/HelloWorld.vue".to_string(),
+                    content: VUE_HELLO_WORLD,
+                },
+                TemplateFile {
+                    path: "frontend/src/style.css".to_string(),
+                    content: VUE_STYLE_CSS,
+                },
+                TemplateFile {
+                    path: "frontend/src/vite-env.d.ts".to_string(),
+                    content: VUE_VITE_ENV,
+                },
+            ],
+            service_configs: vec![ServiceConfig {
+                name: "frontend".to_string(),
+                service_type: "web".to_string(),
+                command: "cd frontend && npm run dev".to_string(),
+                working_dir: "./frontend".to_string(),
+                health_check: HealthCheck {
+                    type_entry: "http".to_string(),
+                    port: 5173,
+                    http_target: "http://localhost:5173".to_string(),
+                },
+                dependencies: vec![],
+            }],
+        }
+    }
+
+
+
     fn react_template(&self) -> Template {
         Template {
             name: "react".to_string(),
@@ -608,64 +672,6 @@ impl InitArgs {
                 TemplateFile {
                     path: "frontend/index.html".to_string(),
                     content: REACT_HTML,
-                },
-            ],
-            service_configs: vec![ServiceConfig {
-                name: "frontend".to_string(),
-                service_type: "web".to_string(),
-                command: "cd frontend && npm run dev".to_string(),
-                working_dir: "./frontend".to_string(),
-                health_check: HealthCheck {
-                    type_entry: "http".to_string(),
-                    port: 5173,
-                    http_target: "http://localhost:5173".to_string(),
-                },
-                dependencies: vec![],
-            }],
-        }
-    }
-
-    fn vue_template(&self) -> Template {
-        Template {
-            name: "vue".to_string(),
-            services: vec!["frontend".to_string()],
-            packages: vec!["nodejs@latest".to_string(), "npm@latest".to_string()],
-            files: vec![
-                TemplateFile {
-                    path: "frontend/package.json".to_string(),
-                    content: VUE_PACKAGE_JSON,
-                },
-                TemplateFile {
-                    path: "frontend/vite.config.ts".to_string(),
-                    content: VUE_VITE_CONFIG,
-                },
-                TemplateFile {
-                    path: "frontend/tsconfig.json".to_string(),
-                    content: VUE_TS_CONFIG,
-                },
-                TemplateFile {
-                    path: "frontend/src/main.ts".to_string(),
-                    content: VUE_MAIN,
-                },
-                TemplateFile {
-                    path: "frontend/src/App.vue".to_string(),
-                    content: VUE_APP,
-                },
-                TemplateFile {
-                    path: "frontend/src/components/HelloWorld.vue".to_string(),
-                    content: VUE_HELLO_WORLD,
-                },
-                TemplateFile {
-                    path: "frontend/src/style.css".to_string(),
-                    content: VUE_STYLE_CSS,
-                },
-                TemplateFile {
-                    path: "frontend/src/vite-env.d.ts".to_string(),
-                    content: VUE_VITE_ENV,
-                },
-                TemplateFile {
-                    path: "frontend/index.html".to_string(),
-                    content: VUE_HTML,
                 },
             ],
             service_configs: vec![ServiceConfig {
@@ -1366,22 +1372,47 @@ const VUE_PACKAGE_JSON: &str = r#"{
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^4.0.0",
+    "@tsconfig/node18": "^18.0.0",
     "typescript": "^5.0.0",
     "vue-tsc": "^1.0.0",
     "vite": "^5.0.0"
   }
 }"#;
 
+const VUE_TS_CONFIG_NODE: &str = r#"{
+  "extends": "@tsconfig/node18/tsconfig.json",
+  "include": [
+    "vite.config.*",
+    "vitest.config.*",
+    "cypress.config.*",
+    "nightwatch.conf.*",
+    "playwright.config.*"
+  ],
+  "compilerOptions": {
+    "composite": true,
+    "module": "ESNext",
+    "types": ["node"]
+  }
+}"#;
+
+
 const VUE_VITE_CONFIG: &str = r#"import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
+// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [vue()],
   server: {
     port: 5173,
     host: true
+  },
+  resolve: {
+    alias: {
+      '@': '/src'
+    }
   }
 })"#;
+
 
 const VUE_TS_CONFIG: &str = r#"{
   "compilerOptions": {
@@ -1411,73 +1442,80 @@ import App from './App.vue'
 
 createApp(App).mount('#app')"#;
 
+
 const VUE_APP: &str = r#"<template>
-  <div>
-    <a href="https://vitejs.dev" target="_blank">
-      <img src="/vite.svg" class="logo" alt="Vite logo" />
-    </a>
-    <a href="https://vuejs.org/" target="_blank">
-      <img src="./assets/vue.svg" class="logo vue" alt="Vue logo" />
-    </a>
+  <div id="app">
+    <img alt="Vue logo" src="./assets/logo.png" width="125" height="125" />
+    <HelloWorld msg="Welcome to Your Vue.js + TypeScript App" />
   </div>
-  <HelloWorld msg="Vite + Vue" />
 </template>
 
 <script setup lang="ts">
 import HelloWorld from './components/HelloWorld.vue'
 </script>
 
-<style scoped>
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.vue:hover {
-  filter: drop-shadow(0 0 2em #42b883aa);
+<style>
+#app {
+  font-family: Avenir, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-align: center;
+  color: #2c3e50;
+  margin-top: 60px;
 }
 </style>"#;
 
 const VUE_HELLO_WORLD: &str = r#"<template>
-  <h1>{{ msg }}</h1>
-
-  <div class="card">
-    <button type="button" @click="count++">count is {{ count }}</button>
+  <div class="hello">
+    <h1>{{ msg }}</h1>
     <p>
-      Edit
-      <code>components/HelloWorld.vue</code> to test HMR
+      For a guide and recipes on how to configure / customize this project,<br>
+      check out the
+      <a href="https://cli.vuejs.org" target="_blank" rel="noopener">vue-cli documentation</a>.
     </p>
+    <h3>Installed CLI Plugins</h3>
+    <ul>
+      <li><a href="https://github.com/vuejs/vue-cli/tree/dev/packages/%40vue/cli-plugin-typescript" target="_blank" rel="noopener">typescript</a></li>
+    </ul>
+    <h3>Essential Links</h3>
+    <ul>
+      <li><a href="https://vuejs.org" target="_blank" rel="noopener">Core Docs</a></li>
+      <li><a href="https://forum.vuejs.org" target="_blank" rel="noopener">Forum</a></li>
+      <li><a href="https://chat.vuejs.org" target="_blank" rel="noopener">Community Chat</a></li>
+      <li><a href="https://twitter.com/vuejs" target="_blank" rel="noopener">Twitter</a></li>
+      <li><a href="https://news.vuejs.org" target="_blank" rel="noopener">News</a></li>
+    </ul>
+    <h3>Ecosystem</h3>
+    <ul>
+      <li><a href="https://router.vuejs.org" target="_blank" rel="noopener">vue-router</a></li>
+      <li><a href="https://vuex.vuejs.org" target="_blank" rel="noopener">vuex</a></li>
+      <li><a href="https://github.com/vuejs/vue-devtools#vue-devtools" target="_blank" rel="noopener">vue-devtools</a></li>
+      <li><a href="https://vue-loader.vuejs.org" target="_blank" rel="noopener">vue-loader</a></li>
+      <li><a href="https://github.com/vuejs/awesome-vue" target="_blank" rel="noopener">awesome-vue</a></li>
+    </ul>
   </div>
-
-  <p>
-    Check out
-    <a href="https://vuejs.org/guide/quick-start.html#local" target="_blank"
-      >create-vue</a
-    >, the official Vue + Vite starter
-  </p>
-  <p>
-    Install
-    <a href="https://github.com/vuejs/language-tools" target="_blank">Volar</a>
-    in your IDE for a better DX
-  </p>
-  <p class="read-the-docs">Click on the Vite and Vue logos to learn more</p>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-
-defineProps<{ msg: string }>()
-
-const count = ref(0)
+defineProps<{
+  msg: string
+}>()
 </script>
 
 <style scoped>
-.read-the-docs {
-  color: #888;
+h3 {
+  margin: 40px 0 0;
+}
+ul {
+  list-style-type: none;
+  padding: 0;
+}
+li {
+  display: inline-block;
+  margin: 0 10px;
+}
+a {
+  color: #42b983;
 }
 </style>"#;
 
