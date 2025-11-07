@@ -95,6 +95,7 @@ impl InitArgs {
         for service in services {
             let service_dir = format!("{}/{}", project_name, service);
             
+            // Handle Node.js dependencies
             if Path::new(&format!("{}/package.json", service_dir)).exists() {
                 println!("   Installing dependencies for {}...", service);
                 
@@ -122,10 +123,60 @@ impl InitArgs {
                     println!("   💡 Install Node.js and run 'cd {} && npm install'", service_dir);
                 }
             }
+            
+            // Handle Python dependencies with virtual environment
+            if Path::new(&format!("{}/requirements.txt", service_dir)).exists() {
+                println!("   Setting up Python virtual environment for {}...", service);
+                
+                // Make the setup script executable
+                let setup_script = format!("{}/setup_venv.sh", service_dir);
+                if Path::new(&setup_script).exists() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mut perms = std::fs::metadata(&setup_script)?.permissions();
+                        perms.set_mode(0o755);
+                        std::fs::set_permissions(&setup_script, perms)?;
+                    }
+                }
+                
+                // Run the setup script
+                if Command::new("python").arg("--version").output().is_ok() {
+                    let status = if cfg!(target_os = "windows") {
+                        Command::new("cmd")
+                            .args(["/C", "setup_venv.bat"])
+                            .current_dir(&service_dir)
+                            .status()
+                    } else {
+                        Command::new("sh")
+                            .arg("./setup_venv.sh")
+                            .current_dir(&service_dir)
+                            .status()
+                    };
+                    
+                    match status {
+                        Ok(exit_status) if exit_status.success() => {
+                            println!("   ✅ Python virtual environment created and dependencies installed for {}", service);
+                        }
+                        Ok(exit_status) => {
+                            println!("   ⚠️  Failed to setup Python environment for {} (exit code: {})", service, exit_status);
+                            println!("   💡 Run 'cd {} && ./setup_venv.sh' manually", service_dir);
+                        }
+                        Err(e) => {
+                            println!("   ⚠️  Could not setup Python environment for {}: {}", service, e);
+                            println!("   💡 Make sure Python is installed and run 'cd {} && ./setup_venv.sh'", service_dir);
+                        }
+                    }
+                } else {
+                    println!("   ⚠️  Python not available for {}", service);
+                    println!("   💡 Install Python and run 'cd {} && ./setup_venv.sh'", service_dir);
+                }
+            }
         }
         
         Ok(())
     }
+
     
     async fn get_project_name(&self) -> Result<String> {
         if let Some(name) = &self.name {
@@ -342,8 +393,16 @@ impl InitArgs {
             
             std::fs::write(&full_path, file.content)?;
         }
+        
+        // Add Windows batch file for Python projects on Windows
+        if template.name == "python" && cfg!(target_os = "windows") {
+            let batch_path = format!("{}/api/setup_venv.bat", project_name);
+            std::fs::write(batch_path, PYTHON_VENV_SETUP_WINDOWS)?;
+        }
+        
         Ok(())
     }
+
 
     async fn create_fallback_structure(&self, project_name: &str, _template: &str, services: &[String]) -> Result<()> {
         for service in services {
@@ -815,11 +874,15 @@ impl InitArgs {
                     path: "api/main.py".to_string(),
                     content: PYTHON_MAIN,
                 },
+                TemplateFile {
+                    path: "api/setup_venv.sh".to_string(),
+                    content: PYTHON_VENV_SETUP,
+                },
             ],
             service_configs: vec![ServiceConfig {
                 name: "api".to_string(),
                 service_type: "api".to_string(),
-                command: "cd api && python main.py".to_string(),
+                command: "cd api && ./setup_venv.sh && source venv/bin/activate && python main.py".to_string(),
                 working_dir: "./api".to_string(),
                 health_check: HealthCheck {
                     type_entry: "http".to_string(),
@@ -1890,23 +1953,101 @@ app.listen(port, () => {
 
 // Python API Templates
 const PYTHON_REQUIREMENTS: &str = r#"fastapi==0.104.0
-uvicorn==0.24.0"#;
+uvicorn==0.24.0
+python-multipart==0.0.6"#;
 
-const PYTHON_MAIN: &str = r#"from fastapi import FastAPI
-from datetime import datetime
+const PYTHON_VENV_SETUP: &str = r#"#!/bin/bash
+set -e
 
-app = FastAPI()
+# Create virtual environment if it doesn't exist
+if [ ! -d "venv" ]; then
+    echo "Creating Python virtual environment..."
+    python -m venv venv
+fi
+
+# Activate virtual environment and install dependencies
+echo "Installing Python dependencies..."
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+
+echo "✅ Python virtual environment setup complete!"
+echo "To activate manually, run: source venv/bin/activate"
+"#;
+
+// Also create a Windows batch version
+const PYTHON_VENV_SETUP_WINDOWS: &str = r#"@echo off
+setlocal enabledelayedexpansion
+
+REM Create virtual environment if it doesn't exist
+if not exist "venv" (
+    echo Creating Python virtual environment...
+    python -m venv venv
+)
+
+REM Activate virtual environment and install dependencies
+echo Installing Python dependencies...
+call venv\Scripts\activate.bat
+pip install --upgrade pip
+pip install -r requirements.txt
+
+echo ✅ Python virtual environment setup complete!
+echo To activate manually, run: venv\Scripts\activate.bat
+"#;
+
+const PYTHON_API_SERVICE_CONFIG: &str = r#"  - name: "api"
+    service_type: "api"
+    command: "cd api && ./setup_venv.sh && source venv/bin/activate && python main.py"
+    working_dir: "./api"
+    health_check:
+      type_entry: "http"
+      port: 8000
+      http_target: "http://localhost:8000/health"
+    dependencies: []"#;
+
+const PYTHON_MAIN: &str = r#"#!/usr/bin/env python3
+"""
+DevBox Python API Server
+This script automatically uses the virtual environment if available.
+"""
+
+import os
+import sys
+
+# Try to activate virtual environment if it exists
+venv_path = os.path.join(os.path.dirname(__file__), 'venv')
+if os.path.exists(venv_path):
+    # Add virtual environment site-packages to path
+    if sys.platform == "win32":
+        site_packages = os.path.join(venv_path, 'Lib', 'site-packages')
+    else:
+        site_packages = os.path.join(venv_path, 'lib', f'python{sys.version_info.major}.{sys.version_info.minor}', 'site-packages')
+    
+    if os.path.exists(site_packages):
+        sys.path.insert(0, site_packages)
+
+try:
+    from fastapi import FastAPI
+    from datetime import datetime
+except ImportError:
+    print("Error: Required dependencies not found.")
+    print("Please run: ./setup_venv.sh (Linux/Mac) or setup_venv.bat (Windows)")
+    sys.exit(1)
+
+app = FastAPI(title="DevBox Python API", version="1.0.0")
 
 @app.get("/")
 async def root():
-    return {"message": "Hello from Devbox Python API!"}
+    return {"message": "Hello from DevBox Python API!", "environment": "virtualenv"}
 
 @app.get("/health")
 async def health():
-    return {"status": "OK", "timestamp": datetime.now().isoformat()}
+    return {"status": "OK", "timestamp": datetime.now().isoformat(), "python_path": sys.prefix}
 
 if __name__ == "__main__":
     import uvicorn
+    print("🚀 Starting DevBox Python API Server...")
+    print(f"📦 Using Python environment: {sys.prefix}")
     uvicorn.run(app, host="0.0.0.0", port=8000)"#;
 
 // Rust API Templates
