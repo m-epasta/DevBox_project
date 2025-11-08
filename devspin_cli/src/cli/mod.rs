@@ -28,6 +28,7 @@ pub enum Commands {
     // Restart(restart::RestartArgs),
     // /// Manage project configuration
     // Config(config::ConfigArgs),
+    Welcome,
 }
 
 impl Cli {
@@ -39,6 +40,10 @@ impl Cli {
             Commands::Init(args) => {
                 args.execute().await
             }
+            Commands::Welcome => {
+                welcome_message::welcome_message();
+                Ok(())
+            }
         }
     }
 }
@@ -49,6 +54,7 @@ pub mod stop;
 pub mod list;
 pub mod status;
 pub mod init;
+pub mod welcome_message;
 // pub mod logs;
 // pub mod restart;
 // pub mod config;

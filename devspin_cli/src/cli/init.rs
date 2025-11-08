@@ -1,8 +1,10 @@
 use clap::Args;
+use colored::*;
 use std::io::{self, Write};
 use crate::error::Result;
 use std::process::Command;
 use std::path::Path;
+
 // Template data structures
 #[derive(Debug, Clone)]
 struct TemplateFile {
@@ -57,11 +59,21 @@ pub struct InitArgs {
 
 impl InitArgs {
     pub async fn execute(&self) -> Result<()> {
-        println!("Initializing new Devspin project...");
+        println!("{}", r#"
+    ██████╗ ███████╗██╗   ██╗███████╗██████╗ ██╗███╗   ██╗
+    ██╔══██╗██╔════╝██║   ██║██╔════╝██╔══██╗██║████╗  ██║
+    ██║  ██║█████╗  ██║   ██║███████╗██████╔╝██║██╔██╗ ██║
+    ██║  ██║██╔══╝  ╚██╗ ██╔╝╚════██║██╔═══╝ ██║██║╚██╗██║
+    ██████╔╝███████╗ ╚████╔╝ ███████║██║     ██║██║ ╚████║
+    ╚═════╝ ╚══════╝  ╚═══╝  ╚══════╝╚═╝     ╚═╝╚═╝  ╚═══╝
+    "#.bright_cyan().bold());
 
-      if std::env::var("DEVSPIN_DEBUG").is_ok() {
-          self.list_available_templates();
-      }
+        
+        println!("{}", "Initializing new Devspin project...".bold());
+
+        if std::env::var("DEVSPIN_DEBUG").is_ok() {
+            self.list_available_templates();
+        }
 
         let project_name = self.get_project_name().await?;
         let template = self.select_template().await?;
@@ -81,22 +93,24 @@ impl InitArgs {
             self.generate_docker_files(&project_name, &template).await?;
         }
         
-        println!("Successfully created project: {}", project_name);
-        println!("Project location: ./{}", project_name);
-        println!("Get started with: cd {} && devspin start", project_name);
+        println!("\n{}", "=".repeat(50).bright_green());
+        println!("{} {}", "[SUCCESS]".bright_green().bold(), format!("Project '{}' created successfully!", project_name).bold());
+        println!("{} {}", "[LOCATION]".bright_cyan(), format!("Project location: ./{}", project_name));
+        println!("{} {}", "[NEXT]".bright_blue(), format!("Get started with: cd {} && devspin start", project_name).bold());
+        println!("{}", "=".repeat(50).bright_green());
         
         Ok(())
     }
 
     async fn install_dependencies(&self, project_name: &str, services: &[String]) -> Result<()> {
-        println!("📦 Installing dependencies...");
+        println!("{}", "[DEPENDENCIES] Installing dependencies...".bright_cyan().bold());
         
         for service in services {
             let service_dir = format!("{}/{}", project_name, service);
             
             // Handle Node.js dependencies
             if Path::new(&format!("{}/package.json", service_dir)).exists() {
-                println!("   Installing Node.js dependencies for {}...", service);
+                println!("   {} {}", "[NPM]".bright_blue(), format!("Installing Node.js dependencies for {}...", service));
                 
                 if Command::new("npm").arg("--version").output().is_ok() {
                     let status = Command::new("npm")
@@ -106,26 +120,26 @@ impl InitArgs {
                     
                     match status {
                         Ok(exit_status) if exit_status.success() => {
-                            println!("   ✅ Dependencies installed for {}", service);
+                            println!("   {} {}", "[OK]".bright_green(), format!("Dependencies installed for {}", service));
                         }
                         Ok(exit_status) => {
-                            println!("   ⚠️  Failed to install dependencies for {} (exit code: {})", service, exit_status);
-                            println!("   💡 Run 'cd {} && npm install' manually", service_dir);
+                            println!("   {} {}", "[WARN]".bright_yellow(), format!("Failed to install dependencies for {} (exit code: {})", service, exit_status));
+                            println!("   {} {}", "[TIP]".bright_blue(), format!("Run 'cd {} && npm install' manually", service_dir));
                         }
                         Err(e) => {
-                            println!("   ⚠️  Could not run npm install for {}: {}", service, e);
-                            println!("   💡 Make sure Node.js is installed and run 'cd {} && npm install'", service_dir);
+                            println!("   {} {}", "[WARN]".bright_yellow(), format!("Could not run npm install for {}: {}", service, e));
+                            println!("   {} {}", "[TIP]".bright_blue(), format!("Make sure Node.js is installed and run 'cd {} && npm install'", service_dir));
                         }
                     }
                 } else {
-                    println!("   ⚠️  npm not available for {}", service);
-                    println!("   💡 Install Node.js and run 'cd {} && npm install'", service_dir);
+                    println!("   {} {}", "[WARN]".bright_yellow(), format!("npm not available for {}", service));
+                    println!("   {} {}", "[TIP]".bright_blue(), format!("Install Node.js and run 'cd {} && npm install'", service_dir));
                 }
             }
             
             // Handle Python dependencies with virtual environment
             if Path::new(&format!("{}/requirements.txt", service_dir)).exists() {
-                println!("   Setting up Python virtual environment for {}...", service);
+                println!("   {} {}", "[PYTHON]".bright_green(), format!("Setting up Python virtual environment for {}...", service));
                 
                 // Make the setup script executable
                 let setup_script = format!("{}/setup_venv.sh", service_dir);
@@ -154,15 +168,15 @@ impl InitArgs {
                 
                 match status {
                     Ok(exit_status) if exit_status.success() => {
-                        println!("   ✅ Python virtual environment created and dependencies installed for {}", service);
+                        println!("   {} {}", "[OK]".bright_green(), format!("Python virtual environment created and dependencies installed for {}", service));
                     }
                     Ok(exit_status) => {
-                        println!("   ⚠️  Failed to setup Python environment for {} (exit code: {})", service, exit_status);
-                        println!("   💡 Run 'cd {} && ./setup_venv.sh' manually", service_dir);
+                        println!("   {} {}", "[WARN]".bright_yellow(), format!("Failed to setup Python environment for {} (exit code: {})", service, exit_status));
+                        println!("   {} {}", "[TIP]".bright_blue(), format!("Run 'cd {} && ./setup_venv.sh' manually", service_dir));
                     }
                     Err(e) => {
-                        println!("   ⚠️  Could not setup Python environment for {}: {}", service, e);
-                        println!("   💡 Make sure Python is installed and run 'cd {} && ./setup_venv.sh'", service_dir);
+                        println!("   {} {}", "[WARN]".bright_yellow(), format!("Could not setup Python environment for {}: {}", service, e));
+                        println!("   {} {}", "[TIP]".bright_blue(), format!("Make sure Python is installed and run 'cd {} && ./setup_venv.sh'", service_dir));
                     }
                 }
             }
@@ -171,7 +185,6 @@ impl InitArgs {
         Ok(())
     }
 
-    
     async fn get_project_name(&self) -> Result<String> {
         if let Some(name) = &self.name {
             return self.validate_project_name(name);
@@ -181,7 +194,7 @@ impl InitArgs {
             return Ok("my-devspin-project".to_string());
         }
         
-        print!("Project name: ");
+        print!("{} ", "Project name:".bright_cyan().bold());
         io::stdout().flush()?;
         
         let mut input = String::new();
@@ -202,13 +215,13 @@ impl InitArgs {
         
         if name.chars().any(|c| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
             return Err(crate::error::ToolError::ValidationError(
-                "Project name can only contain letters, numbers, hyphens, and underscores".to_string()
+                format!("{} Project name can only contain letters, numbers, hyphens, and underscores", "[ERROR]".bright_red())
             ));
         }
         
         if Path::new(name).exists() {
             return Err(crate::error::ToolError::ValidationError(
-                format!("Directory '{}' already exists", name)
+                format!("{} Directory '{}' already exists", "[ERROR]".bright_red(), name)
             ));
         }
         
@@ -228,7 +241,7 @@ impl InitArgs {
                 "go" | "gin" => "go",
                 "fullstack" | "microservices" | "custom" => template.as_str(),
                 other => {
-                    eprintln!("Unknown template: {}. Using default (custom)", other);
+                    eprintln!("{} {}", "[WARN]".bright_yellow(), format!("Unknown template: {}. Using default (custom)", other));
                     "custom"
                 }
             };
@@ -239,20 +252,20 @@ impl InitArgs {
             return Ok("custom".to_string());
         }
         
-        println!("\nSelect project template:");
-        println!("1. Next.js (Modern React fullstack)");
-        println!("2. React (Vite + TypeScript)");
-        println!("3. Vue (Vite + TypeScript)");
-        println!("4. Svelte (Vite + TypeScript)");
-        println!("5. Node.js (Express API)");
-        println!("6. Python (FastAPI)");
-        println!("7. Rust (Axum Web API)");
-        println!("8. Go (Gin Web API)");
-        println!("9. Fullstack (Frontend + API + Database)");
-        println!("10. Microservices (Multiple services)");
-        println!("11. Custom (Choose individual services)");
+        println!("\n{}", "Select project template:".bright_cyan().bold());
+        println!("{} {}", " 1.".bright_green(), "Next.js (Modern React fullstack)");
+        println!("{} {}", " 2.".bright_green(), "React (Vite + TypeScript)");
+        println!("{} {}", " 3.".bright_green(), "Vue (Vite + TypeScript)");
+        println!("{} {}", " 4.".bright_green(), "Svelte (Vite + TypeScript)");
+        println!("{} {}", " 5.".bright_green(), "Node.js (Express API)");
+        println!("{} {}", " 6.".bright_green(), "Python (FastAPI)");
+        println!("{} {}", " 7.".bright_green(), "Rust (Axum Web API)");
+        println!("{} {}", " 8.".bright_green(), "Go (Gin Web API)");
+        println!("{} {}", " 9.".bright_green(), "Fullstack (Frontend + API + Database)");
+        println!("{} {}", "10.".bright_green(), "Microservices (Multiple services)");
+        println!("{} {}", "11.".bright_green(), "Custom (Choose individual services)");
         
-        print!("Choose template [1-11]: ");
+        print!("{} ", "Choose template [1-11]: ".bright_blue().bold());
         io::stdout().flush()?;
         
         let mut input = String::new();
@@ -311,14 +324,14 @@ impl InitArgs {
     }
 
     async fn select_custom_services(&self) -> Result<Vec<String>> {
-        println!("\nSelect services to include:");
+        println!("\n{}", "Select services to include:".bright_cyan().bold());
         let services = ["frontend", "api", "database", "cache", "auth", "queue", "storage", "monitoring"];
         
         for (i, service) in services.iter().enumerate() {
-            println!("{}. {}", i + 1, service);
+            println!("{}. {}", (i + 1).to_string().bright_green(), service);
         }
         
-        print!("Select services (comma-separated, e.g., 1,2,3): ");
+        print!("{} ", "Select services (comma-separated, e.g., 1,2,3): ".bright_blue().bold());
         io::stdout().flush()?;
         
         let mut input = String::new();
@@ -348,7 +361,7 @@ impl InitArgs {
             return Ok(false);
         }
         
-        print!("Include Docker support? [y/N]: ");
+        print!("{} ", "Include Docker support? [y/N]: ".bright_blue().bold());
         io::stdout().flush()?;
         
         let mut input = String::new();
@@ -358,21 +371,22 @@ impl InitArgs {
     }
     
     async fn create_project_structure(&self, project_name: &str, template: &str, services: &[String], with_docker: bool) -> Result<()> {
-        println!("Creating project structure...");
+        println!("{}", "[STRUCTURE] Creating project structure...".bright_cyan().bold());
         
         std::fs::create_dir_all(project_name)?;
         
         if let Some(template_config) = self.get_template_config(template) {
-            println!("   Using {} template", template_config.name);
-            println!("   Template services: {}", template_config.services.join(", "));
+            println!("   {} {}", "[TEMPLATE]".bright_green(), format!("Using {} template", template_config.name).bold());
+            println!("   {} {}", "[SERVICES]".bright_blue(), format!("Template services: {}", template_config.services.join(", ")));
             self.create_template_files(project_name, &template_config).await?;
         } else {
-            println!("   Using fallback structure for: {}", services.join(", "));
+            println!("   {} {}", "[FALLBACK]".bright_yellow(), format!("Using fallback structure for: {}", services.join(", ")));
             self.create_fallback_structure(project_name, template, services).await?;
         }
         
         if with_docker {
             std::fs::create_dir_all(format!("{}/docker", project_name))?;
+            println!("   {} {}", "[DOCKER]".bright_blue(), "Docker directory created");
         }
         
         Ok(())
@@ -387,22 +401,24 @@ impl InitArgs {
             }
             
             std::fs::write(&full_path, file.content)?;
+            println!("   {} {}", "[FILE]".bright_green(), format!("Created: {}", file.path));
         }
         
         // Add Windows batch file for Python projects on Windows
         if template.name == "python" && cfg!(target_os = "windows") {
             let batch_path = format!("{}/api/setup_venv.bat", project_name);
             std::fs::write(batch_path, PYTHON_VENV_SETUP_WINDOWS)?;
+            println!("   {} {}", "[PYTHON]".bright_green(), "Created Windows Python setup script");
         }
         
         Ok(())
     }
 
-
     async fn create_fallback_structure(&self, project_name: &str, _template: &str, services: &[String]) -> Result<()> {
         for service in services {
             let service_dir = format!("{}/{}", project_name, service);
             std::fs::create_dir_all(&service_dir)?;
+            println!("   {} {}", "[DIR]".bright_cyan(), format!("Created service directory: {}", service));
             
             match service.as_str() {
                 "frontend" => self.create_basic_frontend(&service_dir).await?,
@@ -415,7 +431,7 @@ impl InitArgs {
     }
 
     async fn generate_devspin_yaml(&self, project_name: &str, template: &str, services: &[String], with_docker: bool) -> Result<()> {
-        println!("📄 Generating devspin.yaml...");
+        println!("{}", "[CONFIG] Generating devspin.yaml...".bright_cyan().bold());
         
         let mut yaml_content = format!(
             "name: \"{}\"\ndescription: \"{} project\"\n\n",
@@ -425,7 +441,7 @@ impl InitArgs {
         yaml_content.push_str("packages:\n");
         
         if let Some(template_config) = self.get_template_config(template) {
-            println!("   Configuring packages for {} template", template_config.name);
+            println!("   {} {}", "[PACKAGES]".bright_blue(), format!("Configuring packages for {} template", template_config.name));
             for package in &template_config.packages {
                 yaml_content.push_str(&format!("  {}\n", package));
             }
@@ -443,7 +459,7 @@ impl InitArgs {
         yaml_content.push_str("services:\n");
         
         if let Some(template_config) = self.get_template_config(template) {
-            println!("   Configuring services for {} template", template_config.name);
+            println!("   {} {}", "[SERVICES]".bright_blue(), format!("Configuring services for {} template", template_config.name));
             for service_config in &template_config.service_configs {
                 yaml_content.push_str(&self.service_config_to_yaml(service_config));
             }
@@ -462,6 +478,7 @@ impl InitArgs {
         yaml_content.push_str("\nhooks:\n  pre_start: \"echo 'Setting up development environment'\"\n  post_start: \"echo 'All services are ready!'\"\n");
         
         std::fs::write(format!("{}/devspin.yaml", project_name), yaml_content)?;
+        println!("   {} {}", "[OK]".bright_green(), "devspin.yaml created successfully");
         Ok(())
     }
 
@@ -480,7 +497,7 @@ impl InitArgs {
     }
 
     async fn generate_docker_files(&self, project_name: &str, template: &str) -> Result<()> {
-        println!("🐳 Generating Docker files...");
+        println!("{}", "[DOCKER] Generating Docker files...".bright_blue().bold());
         
         let dockerfile_frontend = match template {
             "nextjs" => DOCKERFILE_NEXTJS,
@@ -491,63 +508,67 @@ impl InitArgs {
             format!("{}/docker/Dockerfile.frontend", project_name),
             dockerfile_frontend
         )?;
+        println!("   {} {}", "[FILE]".bright_green(), "Dockerfile.frontend created");
         
         std::fs::write(
             format!("{}/docker/Dockerfile.api", project_name),
             DOCKERFILE_API
         )?;
+        println!("   {} {}", "[FILE]".bright_green(), "Dockerfile.api created");
         
         std::fs::write(
             format!("{}/docker-compose.yml", project_name),
             DOCKER_COMPOSE
         )?;
+        println!("   {} {}", "[FILE]".bright_green(), "docker-compose.yml created");
         
         std::fs::write(
             format!("{}/.dockerignore", project_name),
             DOCKER_IGNORE
         )?;
+        println!("   {} {}", "[FILE]".bright_green(), ".dockerignore created");
         
         Ok(())
     }
 
-  pub fn list_available_templates(&self) {
-      println!("🎯 Available Devspin Templates:");
-      println!("{:-<50}", "");
-      
-      let templates = [
-          ("nextjs", "Next.js Fullstack"),
-          ("react", "React Frontend"),
-          ("vue", "Vue Frontend"), 
-          ("svelte", "Svelte Frontend"),
-          ("node", "Node.js API"),
-          ("python", "Python FastAPI"),
-          ("rust", "Rust Axum API"),
-          ("go", "Go Gin API"),
-          ("fullstack", "Fullstack App"),
-      ];
-      
-      for (template_key, template_description) in templates {
-          if let Some(template) = self.get_template_config(template_key) {
-              println!("📦 {}", template_description);
-              println!("   Key: {}", template_key);
-              println!("   Services: {}", template.services.join(", "));
-              println!("   Packages: {}", template.packages.join(", "));
-              println!();
-          }
-      }
-  }
+    pub fn list_available_templates(&self) {
+        println!("{}", "Available Devspin Templates:".bright_cyan().bold());
+        println!("{}", "─".repeat(50).bright_cyan());
+        
+        let templates = [
+            ("nextjs", "Next.js Fullstack"),
+            ("react", "React Frontend"),
+            ("vue", "Vue Frontend"), 
+            ("svelte", "Svelte Frontend"),
+            ("node", "Node.js API"),
+            ("python", "Python FastAPI"),
+            ("rust", "Rust Axum API"),
+            ("go", "Go Gin API"),
+            ("fullstack", "Fullstack App"),
+        ];
+        
+        for (template_key, template_description) in templates {
+            if let Some(template) = self.get_template_config(template_key) {
+                println!("{} {}", "[TEMPLATE]".bright_green(), template_description.bold());
+                println!("   {} {}", "[KEY]".dimmed(), format!("Key: {}", template_key));
+                println!("   {} {}", "[SERVICES]".bright_blue(), format!("Services: {}", template.services.join(", ")));
+                println!("   {} {}", "[PACKAGES]".bright_yellow(), format!("Packages: {}", template.packages.join(", ")));
+                println!();
+            }
+        }
+    }
 
     fn validate_template_services(&self, template: &Template, selected_services: &[String]) -> bool {
         for service in selected_services {
             if !template.services.contains(service) {
-                eprintln!("Warning: Service '{}' not typically part of {} template", service, template.name);
+                eprintln!("{} {}", "[WARN]".bright_yellow(), format!("Warning: Service '{}' not typically part of {} template", service, template.name));
                 return false;
             }
         }
         true
     }
 
-    // Template configuration
+    // Template configuration methods remain the same...
     fn get_template_config(&self, template_name: &str) -> Option<Template> {
         match template_name {
             "nextjs" => Some(self.nextjs_template()),
@@ -562,6 +583,7 @@ impl InitArgs {
             _ => None,
         }
     }
+
 
     fn nextjs_template(&self) -> Template {
         Template {
@@ -582,7 +604,7 @@ impl InitArgs {
                     content: NEXTJS_TS_CONFIG,
                 },
                 TemplateFile {
-                    path: "frontend/app/globals.css".to_string(),  // ADD THIS
+                    path: "frontend/app/globals.css".to_string(),
                     content: NEXTJS_GLOBALS_CSS,
                 },
                 TemplateFile {
@@ -640,7 +662,7 @@ impl InitArgs {
                     content: VUE_TS_CONFIG,
                 },
                 TemplateFile {
-                    path: "frontend/tsconfig.node.json".to_string(), // ADD THIS
+                    path: "frontend/tsconfig.node.json".to_string(),
                     content: VUE_TS_CONFIG_NODE,
                 },
                 TemplateFile {
@@ -683,8 +705,6 @@ impl InitArgs {
         }
     }
 
-
-    // Remove the SVG file from the svelte_template files array:
     fn svelte_template(&self) -> Template {
         Template {
             name: "svelte".to_string(),
@@ -715,11 +735,6 @@ impl InitArgs {
                     path: "frontend/index.html".to_string(),
                     content: SVELTE_APP_HTML,
                 },
-                // REMOVE THIS LINE: SVG file causing syntax errors
-                // TemplateFile {
-                //     path: "frontend/vite.svg".to_string(),
-                //     content: SVELTE_VITE_SVG,
-                // },
                 TemplateFile {
                     path: "frontend/src/main.ts".to_string(),
                     content: SVELTE_MAIN,
@@ -752,78 +767,75 @@ impl InitArgs {
         }
     }
 
-
-  fn react_template(&self) -> Template {
-      Template {
-          name: "react".to_string(),
-          services: vec!["frontend".to_string()],
-          packages: vec!["nodejs@latest".to_string(), "npm@latest".to_string()],
-          files: vec![
-              TemplateFile {
-                  path: "frontend/package.json".to_string(),
-                  content: REACT_PACKAGE_JSON,
-              },
-              TemplateFile {
-                  path: "frontend/vite.config.ts".to_string(),
-                  content: REACT_VITE_CONFIG,
-              },
-              TemplateFile {
-                  path: "frontend/tsconfig.json".to_string(),
-                  content: REACT_TS_CONFIG,
-              },
-              TemplateFile {
-                  path: "frontend/tsconfig.node.json".to_string(), // ADD THIS
-                  content: REACT_TS_CONFIG_NODE,
-              },
-              TemplateFile {
-                  path: "frontend/index.html".to_string(),
-                  content: REACT_HTML,
-              },
-              TemplateFile {
-                  path: "frontend/src/main.tsx".to_string(),
-                  content: REACT_MAIN,
-              },
-              TemplateFile {
-                  path: "frontend/src/App.tsx".to_string(),
-                  content: REACT_APP,
-              },
-              TemplateFile {
-                  path: "frontend/src/vite-env.d.ts".to_string(),
-                  content: REACT_VITE_ENV,
-              },
-              TemplateFile {
-                  path: "frontend/src/index.css".to_string(),
-                  content: REACT_INDEX_CSS,
-              },
-              TemplateFile {
-                  path: "frontend/src/App.css".to_string(),
-                  content: REACT_APP_CSS,
-              },
-              TemplateFile {
-                  path: "frontend/src/assets/react.svg".to_string(), // ADD THIS
-                  content: REACT_SVG,
-              },
-              TemplateFile {
-                  path: "frontend/public/vite.svg".to_string(), // ADD THIS
-                  content: VITE_SVG,
-              },
-          ],
-          service_configs: vec![ServiceConfig {
-              name: "frontend".to_string(),
-              service_type: "web".to_string(),
-              command: "cd frontend && npm run dev".to_string(),
-              working_dir: "./frontend".to_string(),
-              health_check: HealthCheck {
-                  type_entry: "http".to_string(),
-                  port: 5173,
-                  http_target: "http://localhost:5173".to_string(),
-              },
-              dependencies: vec![],
-          }],
-      }
-  }
-
-
+    fn react_template(&self) -> Template {
+        Template {
+            name: "react".to_string(),
+            services: vec!["frontend".to_string()],
+            packages: vec!["nodejs@latest".to_string(), "npm@latest".to_string()],
+            files: vec![
+                TemplateFile {
+                    path: "frontend/package.json".to_string(),
+                    content: REACT_PACKAGE_JSON,
+                },
+                TemplateFile {
+                    path: "frontend/vite.config.ts".to_string(),
+                    content: REACT_VITE_CONFIG,
+                },
+                TemplateFile {
+                    path: "frontend/tsconfig.json".to_string(),
+                    content: REACT_TS_CONFIG,
+                },
+                TemplateFile {
+                    path: "frontend/tsconfig.node.json".to_string(),
+                    content: REACT_TS_CONFIG_NODE,
+                },
+                TemplateFile {
+                    path: "frontend/index.html".to_string(),
+                    content: REACT_HTML,
+                },
+                TemplateFile {
+                    path: "frontend/src/main.tsx".to_string(),
+                    content: REACT_MAIN,
+                },
+                TemplateFile {
+                    path: "frontend/src/App.tsx".to_string(),
+                    content: REACT_APP,
+                },
+                TemplateFile {
+                    path: "frontend/src/vite-env.d.ts".to_string(),
+                    content: REACT_VITE_ENV,
+                },
+                TemplateFile {
+                    path: "frontend/src/index.css".to_string(),
+                    content: REACT_INDEX_CSS,
+                },
+                TemplateFile {
+                    path: "frontend/src/App.css".to_string(),
+                    content: REACT_APP_CSS,
+                },
+                TemplateFile {
+                    path: "frontend/src/assets/react.svg".to_string(),
+                    content: REACT_SVG,
+                },
+                TemplateFile {
+                    path: "frontend/public/vite.svg".to_string(),
+                    content: VITE_SVG,
+                },
+            ],
+            service_configs: vec![ServiceConfig {
+                name: "frontend".to_string(),
+                service_type: "web".to_string(),
+                command: "cd frontend && npm run dev".to_string(),
+                working_dir: "./frontend".to_string(),
+                health_check: HealthCheck {
+                    type_entry: "http".to_string(),
+                    port: 5173,
+                    http_target: "http://localhost:5173".to_string(),
+                },
+                dependencies: vec![],
+            }],
+        }
+    }
     
     fn node_template(&self) -> Template {
         Template {
@@ -877,7 +889,7 @@ impl InitArgs {
             service_configs: vec![ServiceConfig {
                 name: "api".to_string(),
                 service_type: "api".to_string(),
-                command: "cd api && ./setup_venv.sh && source venv/bin/activate && python3 main.py".to_string(), // Use python3 here
+                command: "cd api && ./setup_venv.sh && source venv/bin/activate && python3 main.py".to_string(),
                 working_dir: "./api".to_string(),
                 health_check: HealthCheck {
                     type_entry: "http".to_string(),
@@ -888,7 +900,6 @@ impl InitArgs {
             }],
         }
     }
-
 
     fn rust_template(&self) -> Template {
         Template {
@@ -1001,17 +1012,20 @@ impl InitArgs {
     async fn create_basic_frontend(&self, service_dir: &str) -> Result<()> {
         std::fs::write(format!("{}/package.json", service_dir), BASIC_FRONTEND_PACKAGE_JSON)?;
         std::fs::write(format!("{}/index.html", service_dir), BASIC_FRONTEND_HTML)?;
+        println!("   {} {}", "[FILE]".bright_green(), "Created basic frontend files");
         Ok(())
     }
 
     async fn create_basic_api(&self, service_dir: &str) -> Result<()> {
         std::fs::write(format!("{}/package.json", service_dir), BASIC_API_PACKAGE_JSON)?;
         std::fs::write(format!("{}/server.js", service_dir), BASIC_API_SERVER_JS)?;
+        println!("   {} {}", "[FILE]".bright_green(), "Created basic API files");
         Ok(())
     }
 
     async fn create_database(&self, service_dir: &str) -> Result<()> {
         std::fs::write(format!("{}/init.sql", service_dir), DATABASE_INIT_SQL)?;
+        println!("   {} {}", "[FILE]".bright_green(), "Created database initialization file");
         Ok(())
     }
 
@@ -1020,6 +1034,7 @@ impl InitArgs {
             format!("{}/README.md", service_dir),
             format!("# {}\n\nService configuration.", service_name)
         )?;
+        println!("   {} {}", "[FILE]".bright_green(), format!("Created README for {}", service_name));
         Ok(())
     }
 
