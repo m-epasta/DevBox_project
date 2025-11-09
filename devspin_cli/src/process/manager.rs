@@ -1,14 +1,25 @@
-use crate::process::state::{ProcessState, ProcessInfo};
+use crate::process::state::{ProcessInfo};
 use crate::process::global::get_global_state;
-use std::sync::{Mutex, OnceLock};
 
 pub struct ProcessManager; // No state field - stateless
 
 impl ProcessManager {
     pub fn get_running_services() -> Vec<ProcessInfo> {
-        let state = get_global_state(); // Lock inside method
-        state.get_all_processes()
-            .iter()
+        println!("DEBUG: Getting global state lock...");
+        let state = get_global_state();
+        let processes = state.get_all_processes();
+        
+        println!("DEBUG: Global state has {} processes", processes.len());
+        for (pid, process) in processes {
+            println!("DEBUG: Process PID {}: {} - {}", 
+                pid, 
+                process.info.service_name,
+                process.info.project_name
+            );
+        }
+        
+        let result: Vec<ProcessInfo> = processes
+            .values()  // ← FIXED! Use .values() for HashMap
             .map(|running_process| {
                 ProcessInfo {
                     pid: running_process.info.pid,
@@ -19,7 +30,10 @@ impl ProcessManager {
                     status: running_process.info.status.clone(),
                 }
             })
-            .collect()
+            .collect();
+        
+        println!("DEBUG: Returning {} services", result.len());
+        result
     }
 
     pub fn find_service(service_name: &str) -> Option<ProcessInfo> { 

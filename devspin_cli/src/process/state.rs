@@ -45,6 +45,9 @@ impl ProcessState {
         command: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let pid = child.id();
+        
+        println!("🔍 DEBUG add_process: Starting - PID: {}, Service: {}", pid, service_name);
+        println!("🔍 DEBUG add_process: Current processes count: {}", self.processes.len());
 
         let process_info = ProcessInfo {
             pid,
@@ -55,6 +58,8 @@ impl ProcessState {
             status: ProcessStatus::Running,
         };
 
+        println!("🔍 DEBUG add_process: Created ProcessInfo, inserting into HashMap...");
+
         self.processes.insert(
             pid,
             RunningProcess {
@@ -62,6 +67,9 @@ impl ProcessState {
                 child,
             },
         );
+
+        println!("🔍 DEBUG add_process: After insert - processes count: {}", self.processes.len());
+        println!("🔍 DEBUG add_process: Successfully added process {}", pid);
 
         Ok(())
     }
@@ -76,8 +84,8 @@ impl ProcessState {
             .collect()
     }
 
-    pub fn get_all_processes(&self) -> Vec<&RunningProcess> {
-        self.processes.values().collect()
+    pub fn get_all_processes(&self) -> &HashMap<u32, RunningProcess> {
+        &self.processes
     }
 
     pub fn remove_process(&mut self, pid: u32) -> Result<(), Box<dyn std::error::Error>> {

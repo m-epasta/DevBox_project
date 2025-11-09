@@ -18,6 +18,7 @@ struct ServiceConfig {
     service_type: String,
     command: String,
     working_dir: String,
+    setup_command: String,
     health_check: HealthCheck,
     dependencies: Vec<String>,
 }
@@ -37,6 +38,66 @@ struct Template {
     service_configs: Vec<ServiceConfig>,
     packages: Vec<String>,
 }
+
+// Rust dependency setup binary
+const DEPS_SETUP_RS: &str = r#"use std::process::Command;
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("DevSpin - Installing dependencies...");
+    
+    let installers = vec![
+        ("Node.js", "package.json", "npm", vec!["install"]),
+        ("Python", "requirements.txt", "pip", vec!["install", "-r", "requirements.txt"]),
+        ("Rust", "Cargo.toml", "cargo", vec!["fetch"]),
+        ("Go", "go.mod", "go", vec!["mod", "download"]),
+    ];
+    
+    let mut success_count = 0;
+    let mut total_count = 0;
+    
+    for (name, file, cmd, args) in installers {
+        if Path::new(file).exists() {
+            total_count += 1;
+            println!("[SETUP] Installing {} dependencies...", name);
+            
+            if Command::new(cmd).arg("--version").output().is_err() {
+                println!("[WARN] {} not found. Please install {}", cmd, name);
+                continue;
+            }
+            
+            match Command::new(cmd).args(&args).status() {
+                Ok(status) if status.success() => {
+                    println!("[OK] {} dependencies installed", name);
+                    success_count += 1;
+                }
+                Ok(_) => {
+                    println!("[ERROR] Failed to install {} dependencies", name);
+                }
+                Err(e) => {
+                    println!("[ERROR] Error installing {}: {}", name, e);
+                }
+            }
+        }
+    }
+    
+    if success_count == total_count && total_count > 0 {
+        println!("All dependencies installed successfully!");
+    } else if total_count > 0 {
+        println!("[WARN] {}/{} dependency sets installed", success_count, total_count);
+    } else {
+        println!("[INFO] No dependency files found.");
+    }
+    
+    Ok(())
+}
+"#;
+
+const DEPS_SETUP_CARGO: &str = r#"[package]
+name = "devspin-setup"
+version = "0.1.0"
+edition = "2021"
+"#;
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
@@ -68,7 +129,6 @@ impl InitArgs {
     ╚═════╝ ╚══════╝  ╚═══╝  ╚══════╝╚═╝     ╚═╝╚═╝  ╚═══╝
     "#.bright_cyan().bold());
 
-        
         println!("{}", "Initializing new Devspin project...".bold());
 
         if std::env::var("DEVSPIN_DEBUG").is_ok() {
@@ -80,7 +140,6 @@ impl InitArgs {
         let services = self.select_services(&template).await?;
         let with_docker = self.should_include_docker().await?;
         
-        // Validate template services if we have a template config
         if let Some(template_config) = self.get_template_config(&template) {
             self.validate_template_services(&template_config, &services);
         }
@@ -95,7 +154,7 @@ impl InitArgs {
         
         println!("\n{}", "=".repeat(50).bright_green());
         println!("{} {}", "[SUCCESS]".bright_green().bold(), format!("Project '{}' created successfully!", project_name).bold());
-        println!("{} {}", "[LOCATION]".bright_cyan(), format!("Project location: ./{}", project_name));
+        println!("{} {}", "[LOCATION]".bright_cyan(), format_args!("Project location: ./{}", project_name));
         println!("{} {}", "[NEXT]".bright_blue(), format!("Get started with: cd {} && devspin start", project_name).bold());
         println!("{}", "=".repeat(50).bright_green());
         
@@ -105,79 +164,136 @@ impl InitArgs {
     async fn install_dependencies(&self, project_name: &str, services: &[String]) -> Result<()> {
         println!("{}", "[DEPENDENCIES] Installing dependencies...".bright_cyan().bold());
         
-        for service in services {
-            let service_dir = format!("{}/{}", project_name, service);
+        // Try Rust setup binary first
+        let setup_dir = format!("{}/devspin-setup", project_name);
+        if Path::new(&setup_dir).exists() {
+            println!("   {} {}", "[RUST]".bright_yellow(), format_args!("Compiling dependency installer..."));
             
-            // Handle Node.js dependencies
-            if Path::new(&format!("{}/package.json", service_dir)).exists() {
-                println!("   {} {}", "[NPM]".bright_blue(), format!("Installing Node.js dependencies for {}...", service));
-                
-                if Command::new("npm").arg("--version").output().is_ok() {
-                    let status = Command::new("npm")
-                        .arg("install")
-                        .current_dir(&service_dir)
-                        .status();
-                    
-                    match status {
-                        Ok(exit_status) if exit_status.success() => {
-                            println!("   {} {}", "[OK]".bright_green(), format!("Dependencies installed for {}", service));
-                        }
-                        Ok(exit_status) => {
-                            println!("   {} {}", "[WARN]".bright_yellow(), format!("Failed to install dependencies for {} (exit code: {})", service, exit_status));
-                            println!("   {} {}", "[TIP]".bright_blue(), format!("Run 'cd {} && npm install' manually", service_dir));
-                        }
-                        Err(e) => {
-                            println!("   {} {}", "[WARN]".bright_yellow(), format!("Could not run npm install for {}: {}", service, e));
-                            println!("   {} {}", "[TIP]".bright_blue(), format!("Make sure Node.js is installed and run 'cd {} && npm install'", service_dir));
-                        }
-                    }
-                } else {
-                    println!("   {} {}", "[WARN]".bright_yellow(), format!("npm not available for {}", service));
-                    println!("   {} {}", "[TIP]".bright_blue(), format!("Install Node.js and run 'cd {} && npm install'", service_dir));
-                }
-            }
-            
-            // Handle Python dependencies with virtual environment
-            if Path::new(&format!("{}/requirements.txt", service_dir)).exists() {
-                println!("   {} {}", "[PYTHON]".bright_green(), format!("Setting up Python virtual environment for {}...", service));
-                
-                // Make the setup script executable
-                let setup_script = format!("{}/setup_venv.sh", service_dir);
-                if Path::new(&setup_script).exists() {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let mut perms = std::fs::metadata(&setup_script)?.permissions();
-                        perms.set_mode(0o755);
-                        std::fs::set_permissions(&setup_script, perms)?;
-                    }
-                }
-                
-                // Just run the setup script - it will handle Python version internally
-                let status = if cfg!(target_os = "windows") {
-                    Command::new("cmd")
-                        .args(["/C", "setup_venv.bat"])
-                        .current_dir(&service_dir)
-                        .status()
-                } else {
-                    Command::new("sh")
-                        .arg("./setup_venv.sh")
-                        .current_dir(&service_dir)
-                        .status()
-                };
+            if Command::new("cargo").arg("--version").output().is_ok() {
+                let status = Command::new("cargo")
+                    .args(["build", "--release"])
+                    .current_dir(&setup_dir)
+                    .status();
                 
                 match status {
                     Ok(exit_status) if exit_status.success() => {
-                        println!("   {} {}", "[OK]".bright_green(), format!("Python virtual environment created and dependencies installed for {}", service));
+                        println!("   {} {}", "[OK]".bright_green(), format_args!("Dependency installer compiled"));
+                        
+                        // Run the setup binary for each service
+                        let setup_binary = format!("{}/target/release/devspin-setup", setup_dir);
+                        for service in services {
+                            let service_dir = format!("{}/{}", project_name, service);
+                            println!("   {} {}", "[SETUP]".bright_blue(), format_args!("Setting up dependencies for {}...", service));
+                            
+                            let status = Command::new(&setup_binary)
+                                .current_dir(&service_dir)
+                                .status();
+                                
+                            match status {
+                                Ok(exit_status) if exit_status.success() => {
+                                    println!("   {} {}", "[OK]".bright_green(), format_args!("Dependencies ready for {}", service));
+                                }
+                                Ok(_) => {
+                                    println!("   {} {}", "[WARN]".bright_yellow(), format_args!("Dependency setup failed for {}", service));
+                                    self.install_service_dependencies_manual(&service_dir, service).await?;
+                                }
+                                Err(e) => {
+                                    println!("   {} {}", "[WARN]".bright_yellow(), format_args!("Could not run setup for {}: {}", service, e));
+                                    self.install_service_dependencies_manual(&service_dir, service).await?;
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+                    _ => {
+                        println!("   {} {}", "[WARN]".bright_yellow(), format_args!("Failed to compile dependency installer"));
+                    }
+                }
+            } else {
+                println!("   {} {}", "[WARN]".bright_yellow(), format_args!("Cargo not available"));
+            }
+        }
+        
+        // Fallback to manual installation
+        self.install_dependencies_manual(project_name, services).await
+    }
+
+    async fn install_dependencies_manual(&self, project_name: &str, services: &[String]) -> Result<()> {
+        for service in services {
+            let service_dir = format!("{}/{}", project_name, service);
+            self.install_service_dependencies_manual(&service_dir, service).await?;
+        }
+        Ok(())
+    }
+
+    async fn install_service_dependencies_manual(&self, service_dir: &str, service: &str) -> Result<()> {
+        // Node.js dependencies
+        if Path::new(&format!("{}/package.json", service_dir)).exists() {
+            println!("   {} {}", "[NPM]".bright_blue(), format_args!("Installing Node.js dependencies for {}...", service));
+            
+            if Command::new("npm").arg("--version").output().is_ok() {
+                let status = Command::new("npm")
+                    .arg("install")
+                    .current_dir(service_dir)
+                    .status();
+                
+                match status {
+                    Ok(exit_status) if exit_status.success() => {
+                        println!("   {} {}", "[OK]".bright_green(), format_args!("Dependencies installed for {}", service));
                     }
                     Ok(exit_status) => {
-                        println!("   {} {}", "[WARN]".bright_yellow(), format!("Failed to setup Python environment for {} (exit code: {})", service, exit_status));
-                        println!("   {} {}", "[TIP]".bright_blue(), format!("Run 'cd {} && ./setup_venv.sh' manually", service_dir));
+                        println!("   {} {}", "[WARN]".bright_yellow(), format_args!("Failed to install dependencies for {} (exit code: {})", service, exit_status));
+                        println!("   {} {}", "[TIP]".bright_blue(), format_args!("Run 'cd {} && npm install' manually", service_dir));
                     }
                     Err(e) => {
-                        println!("   {} {}", "[WARN]".bright_yellow(), format!("Could not setup Python environment for {}: {}", service, e));
-                        println!("   {} {}", "[TIP]".bright_blue(), format!("Make sure Python is installed and run 'cd {} && ./setup_venv.sh'", service_dir));
+                        println!("   {} {}", "[WARN]".bright_yellow(), format_args!("Could not run npm install for {}: {}", service, e));
+                        println!("   {} {}", "[TIP]".bright_blue(), format_args!("Make sure Node.js is installed and run 'cd {} && npm install'", service_dir));
                     }
+                }
+            } else {
+                println!("   {} {}", "[WARN]".bright_yellow(), format_args!("npm not available for {}", service));
+                println!("   {} {}", "[TIP]".bright_blue(), format_args!("Install Node.js and run 'cd {} && npm install'", service_dir));
+            }
+        }
+        
+        // Python dependencies
+        if Path::new(&format!("{}/requirements.txt", service_dir)).exists() {
+            println!("   {} {}", "[PYTHON]".bright_green(), format_args!("Setting up Python virtual environment for {}...", service));
+            
+            let setup_script = format!("{}/setup_venv.sh", service_dir);
+            if Path::new(&setup_script).exists() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = std::fs::metadata(&setup_script)?.permissions();
+                    perms.set_mode(0o755);
+                    std::fs::set_permissions(&setup_script, perms)?;
+                }
+            }
+            
+            let status = if cfg!(target_os = "windows") {
+                Command::new("cmd")
+                    .args(["/C", "setup_venv.bat"])
+                    .current_dir(service_dir)
+                    .status()
+            } else {
+                Command::new("sh")
+                    .arg("./setup_venv.sh")
+                    .current_dir(service_dir)
+                    .status()
+            };
+            
+            match status {
+                Ok(exit_status) if exit_status.success() => {
+                    println!("   {} {}", "[OK]".bright_green(), format_args!("Python virtual environment created and dependencies installed for {}", service));
+                }
+                Ok(exit_status) => {
+                    println!("   {} {}", "[WARN]".bright_yellow(), format_args!("Failed to setup Python environment for {} (exit code: {})", service, exit_status));
+                    println!("   {} {}", "[TIP]".bright_blue(), format_args!("Run 'cd {} && ./setup_venv.sh' manually", service_dir));
+                }
+                Err(e) => {
+                    println!("   {} {}", "[WARN]".bright_yellow(), format_args!("Could not setup Python environment for {}: {}", service, e));
+                    println!("   {} {}", "[TIP]".bright_blue(), format_args!("Make sure Python is installed and run 'cd {} && ./setup_venv.sh'", service_dir));
                 }
             }
         }
@@ -241,7 +357,7 @@ impl InitArgs {
                 "go" | "gin" => "go",
                 "fullstack" | "microservices" | "custom" => template.as_str(),
                 other => {
-                    eprintln!("{} {}", "[WARN]".bright_yellow(), format!("Unknown template: {}. Using default (custom)", other));
+                    eprintln!("{} {}", "[WARN]".bright_yellow(), format_args!("Unknown template: {}. Using default (custom)", other));
                     "custom"
                 }
             };
@@ -253,17 +369,17 @@ impl InitArgs {
         }
         
         println!("\n{}", "Select project template:".bright_cyan().bold());
-        println!("{} {}", " 1.".bright_green(), "Next.js (Modern React fullstack)");
-        println!("{} {}", " 2.".bright_green(), "React (Vite + TypeScript)");
-        println!("{} {}", " 3.".bright_green(), "Vue (Vite + TypeScript)");
-        println!("{} {}", " 4.".bright_green(), "Svelte (Vite + TypeScript)");
-        println!("{} {}", " 5.".bright_green(), "Node.js (Express API)");
-        println!("{} {}", " 6.".bright_green(), "Python (FastAPI)");
-        println!("{} {}", " 7.".bright_green(), "Rust (Axum Web API)");
-        println!("{} {}", " 8.".bright_green(), "Go (Gin Web API)");
-        println!("{} {}", " 9.".bright_green(), "Fullstack (Frontend + API + Database)");
-        println!("{} {}", "10.".bright_green(), "Microservices (Multiple services)");
-        println!("{} {}", "11.".bright_green(), "Custom (Choose individual services)");
+        println!("{} {}", " 1.".bright_green(), format_args!("Next.js (Modern React fullstack)"));
+        println!("{} {}", " 2.".bright_green(), format_args!("React (Vite + TypeScript)"));
+        println!("{} {}", " 3.".bright_green(), format_args!("Vue (Vite + TypeScript)"));
+        println!("{} {}", " 4.".bright_green(), format_args!("Svelte (Vite + TypeScript)"));
+        println!("{} {}", " 5.".bright_green(), format_args!("Node.js (Express API)"));
+        println!("{} {}", " 6.".bright_green(), format_args!("Python (FastAPI)"));
+        println!("{} {}", " 7.".bright_green(), format_args!("Rust (Axum Web API)"));
+        println!("{} {}", " 8.".bright_green(), format_args!("Go (Gin Web API)"));
+        println!("{} {}", " 9.".bright_green(), format_args!("Fullstack (Frontend + API + Database)"));
+        println!("{} {}", "10.".bright_green(), format_args!("Microservices (Multiple services)"));
+        println!("{} {}", "11.".bright_green(), format_args!("Custom (Choose individual services)"));
         
         print!("{} ", "Choose template [1-11]: ".bright_blue().bold());
         io::stdout().flush()?;
@@ -377,16 +493,16 @@ impl InitArgs {
         
         if let Some(template_config) = self.get_template_config(template) {
             println!("   {} {}", "[TEMPLATE]".bright_green(), format!("Using {} template", template_config.name).bold());
-            println!("   {} {}", "[SERVICES]".bright_blue(), format!("Template services: {}", template_config.services.join(", ")));
+            println!("   {} {}", "[SERVICES]".bright_blue(), format_args!("Template services: {}", template_config.services.join(", ")));
             self.create_template_files(project_name, &template_config).await?;
         } else {
-            println!("   {} {}", "[FALLBACK]".bright_yellow(), format!("Using fallback structure for: {}", services.join(", ")));
+            println!("   {} {}", "[FALLBACK]".bright_yellow(), format_args!("Using fallback structure for: {}", services.join(", ")));
             self.create_fallback_structure(project_name, template, services).await?;
         }
         
         if with_docker {
             std::fs::create_dir_all(format!("{}/docker", project_name))?;
-            println!("   {} {}", "[DOCKER]".bright_blue(), "Docker directory created");
+            println!("   {} {}", "[DOCKER]".bright_blue(), format_args!("Docker directory created"));
         }
         
         Ok(())
@@ -401,14 +517,14 @@ impl InitArgs {
             }
             
             std::fs::write(&full_path, file.content)?;
-            println!("   {} {}", "[FILE]".bright_green(), format!("Created: {}", file.path));
+            println!("   {} {}", "[FILE]".bright_green(), format_args!("Created: {}", file.path));
         }
         
         // Add Windows batch file for Python projects on Windows
         if template.name == "python" && cfg!(target_os = "windows") {
             let batch_path = format!("{}/api/setup_venv.bat", project_name);
             std::fs::write(batch_path, PYTHON_VENV_SETUP_WINDOWS)?;
-            println!("   {} {}", "[PYTHON]".bright_green(), "Created Windows Python setup script");
+            println!("   {} {}", "[PYTHON]".bright_green(), format_args!("Created Windows Python setup script"));
         }
         
         Ok(())
@@ -418,7 +534,7 @@ impl InitArgs {
         for service in services {
             let service_dir = format!("{}/{}", project_name, service);
             std::fs::create_dir_all(&service_dir)?;
-            println!("   {} {}", "[DIR]".bright_cyan(), format!("Created service directory: {}", service));
+            println!("   {} {}", "[DIR]".bright_cyan(), format_args!("Created service directory: {}", service));
             
             match service.as_str() {
                 "frontend" => self.create_basic_frontend(&service_dir).await?,
@@ -441,7 +557,7 @@ impl InitArgs {
         yaml_content.push_str("packages:\n");
         
         if let Some(template_config) = self.get_template_config(template) {
-            println!("   {} {}", "[PACKAGES]".bright_blue(), format!("Configuring packages for {} template", template_config.name));
+            println!("   {} {}", "[PACKAGES]".bright_blue(), format_args!("Configuring packages for {} template", template_config.name));
             for package in &template_config.packages {
                 yaml_content.push_str(&format!("  {}\n", package));
             }
@@ -459,7 +575,7 @@ impl InitArgs {
         yaml_content.push_str("services:\n");
         
         if let Some(template_config) = self.get_template_config(template) {
-            println!("   {} {}", "[SERVICES]".bright_blue(), format!("Configuring services for {} template", template_config.name));
+            println!("   {} {}", "[SERVICES]".bright_blue(), format_args!("Configuring services for {} template", template_config.name));
             for service_config in &template_config.service_configs {
                 yaml_content.push_str(&self.service_config_to_yaml(service_config));
             }
@@ -478,21 +594,22 @@ impl InitArgs {
         yaml_content.push_str("\nhooks:\n  pre_start: \"echo 'Setting up development environment'\"\n  post_start: \"echo 'All services are ready!'\"\n");
         
         std::fs::write(format!("{}/devspin.yaml", project_name), yaml_content)?;
-        println!("   {} {}", "[OK]".bright_green(), "devspin.yaml created successfully");
+        println!("   {} {}", "[OK]".bright_green(), format_args!("devspin.yaml created successfully"));
         Ok(())
     }
 
     fn service_config_to_yaml(&self, config: &ServiceConfig) -> String {
         format!(
-            "  - name: \"{}\"\n    service_type: \"{}\"\n    command: \"{}\"\n    working_dir: \"{}\"\n    health_check:\n      type_entry: \"{}\"\n      port: {}\n      http_target: \"{}\"\n    dependencies: [{}]\n",
+            "  - name: \"{}\"\n    service_type: \"{}\"\n    command: \"{}\"\n    working_dir: \"{}\"\n    setup_command: \"{}\"\n    health_check:\n      type_entry: \"{}\"\n      port: {}\n      http_target: \"{}\"\n    dependencies: [{}]\n",
             config.name,
             config.service_type,
             config.command,
             config.working_dir,
+            config.setup_command,
             config.health_check.type_entry,
             config.health_check.port,
             config.health_check.http_target,
-            config.dependencies.join(", ")
+            config.dependencies.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ")
         )
     }
 
@@ -508,25 +625,25 @@ impl InitArgs {
             format!("{}/docker/Dockerfile.frontend", project_name),
             dockerfile_frontend
         )?;
-        println!("   {} {}", "[FILE]".bright_green(), "Dockerfile.frontend created");
+        println!("   {} {}", "[FILE]".bright_green(), format_args!("Dockerfile.frontend created"));
         
         std::fs::write(
             format!("{}/docker/Dockerfile.api", project_name),
             DOCKERFILE_API
         )?;
-        println!("   {} {}", "[FILE]".bright_green(), "Dockerfile.api created");
+        println!("   {} {}", "[FILE]".bright_green(), format_args!("Dockerfile.api created"));
         
         std::fs::write(
             format!("{}/docker-compose.yml", project_name),
             DOCKER_COMPOSE
         )?;
-        println!("   {} {}", "[FILE]".bright_green(), "docker-compose.yml created");
+        println!("   {} {}", "[FILE]".bright_green(), format_args!("docker-compose.yml created"));
         
         std::fs::write(
             format!("{}/.dockerignore", project_name),
             DOCKER_IGNORE
         )?;
-        println!("   {} {}", "[FILE]".bright_green(), ".dockerignore created");
+        println!("   {} {}", "[FILE]".bright_green(), format_args!(".dockerignore created"));
         
         Ok(())
     }
@@ -550,9 +667,9 @@ impl InitArgs {
         for (template_key, template_description) in templates {
             if let Some(template) = self.get_template_config(template_key) {
                 println!("{} {}", "[TEMPLATE]".bright_green(), template_description.bold());
-                println!("   {} {}", "[KEY]".dimmed(), format!("Key: {}", template_key));
-                println!("   {} {}", "[SERVICES]".bright_blue(), format!("Services: {}", template.services.join(", ")));
-                println!("   {} {}", "[PACKAGES]".bright_yellow(), format!("Packages: {}", template.packages.join(", ")));
+                println!("   {} {}", "[KEY]".dimmed(), format_args!("Key: {}", template_key));
+                println!("   {} {}", "[SERVICES]".bright_blue(), format_args!("Services: {}", template.services.join(", ")));
+                println!("   {} {}", "[PACKAGES]".bright_yellow(), format_args!("Packages: {}", template.packages.join(", ")));
                 println!();
             }
         }
@@ -561,14 +678,13 @@ impl InitArgs {
     fn validate_template_services(&self, template: &Template, selected_services: &[String]) -> bool {
         for service in selected_services {
             if !template.services.contains(service) {
-                eprintln!("{} {}", "[WARN]".bright_yellow(), format!("Warning: Service '{}' not typically part of {} template", service, template.name));
+                eprintln!("{} {}", "[WARN]".bright_yellow(), format_args!("Warning: Service '{}' not typically part of {} template", service, template.name));
                 return false;
             }
         }
         true
     }
 
-    // Template configuration methods remain the same...
     fn get_template_config(&self, template_name: &str) -> Option<Template> {
         match template_name {
             "nextjs" => Some(self.nextjs_template()),
@@ -583,7 +699,6 @@ impl InitArgs {
             _ => None,
         }
     }
-
 
     fn nextjs_template(&self) -> Template {
         Template {
@@ -627,12 +742,21 @@ impl InitArgs {
                     path: "frontend/postcss.config.js".to_string(),
                     content: NEXTJS_POSTCSS_CONFIG,
                 },
+                TemplateFile {
+                    path: "devspin-setup/Cargo.toml".to_string(),
+                    content: DEPS_SETUP_CARGO,
+                },
+                TemplateFile {
+                    path: "devspin-setup/src/main.rs".to_string(),
+                    content: DEPS_SETUP_RS,
+                },
             ],
             service_configs: vec![ServiceConfig {
                 name: "frontend".to_string(),
                 service_type: "web".to_string(),
                 command: "cd frontend && npm run dev".to_string(),
-                working_dir: "./frontend".to_string(),
+                working_dir: "".to_string(),
+                setup_command: "cd devspin-setup && cargo run --release".to_string(),
                 health_check: HealthCheck {
                     type_entry: "http".to_string(),
                     port: 3000,
@@ -689,12 +813,21 @@ impl InitArgs {
                     path: "frontend/src/vite-env.d.ts".to_string(),
                     content: VUE_VITE_ENV,
                 },
+                TemplateFile {
+                    path: "devspin-setup/Cargo.toml".to_string(),
+                    content: DEPS_SETUP_CARGO,
+                },
+                TemplateFile {
+                    path: "devspin-setup/src/main.rs".to_string(),
+                    content: DEPS_SETUP_RS,
+                },
             ],
             service_configs: vec![ServiceConfig {
                 name: "frontend".to_string(),
                 service_type: "web".to_string(),
                 command: "cd frontend && npm run dev".to_string(),
-                working_dir: "./frontend".to_string(),
+                working_dir: "".to_string(),
+                setup_command: "cd devspin-setup && cargo run --release".to_string(),
                 health_check: HealthCheck {
                     type_entry: "http".to_string(),
                     port: 5173,
@@ -751,12 +884,21 @@ impl InitArgs {
                     path: "frontend/src/vite-env.d.ts".to_string(),
                     content: SVELTE_VITE_ENV,
                 },
+                TemplateFile {
+                    path: "devspin-setup/Cargo.toml".to_string(),
+                    content: DEPS_SETUP_CARGO,
+                },
+                TemplateFile {
+                    path: "devspin-setup/src/main.rs".to_string(),
+                    content: DEPS_SETUP_RS,
+                },
             ],
             service_configs: vec![ServiceConfig {
                 name: "frontend".to_string(),
                 service_type: "web".to_string(),
                 command: "cd frontend && npm run dev".to_string(),
-                working_dir: "./frontend".to_string(),
+                working_dir: "".to_string(),
+                setup_command: "cd devspin-setup && cargo run --release".to_string(),
                 health_check: HealthCheck {
                     type_entry: "http".to_string(),
                     port: 5173,
@@ -810,23 +952,20 @@ impl InitArgs {
                     content: REACT_INDEX_CSS,
                 },
                 TemplateFile {
-                    path: "frontend/src/App.css".to_string(),
-                    content: REACT_APP_CSS,
+                    path: "devspin-setup/Cargo.toml".to_string(),
+                    content: DEPS_SETUP_CARGO,
                 },
                 TemplateFile {
-                    path: "frontend/src/assets/react.svg".to_string(),
-                    content: REACT_SVG,
-                },
-                TemplateFile {
-                    path: "frontend/public/vite.svg".to_string(),
-                    content: VITE_SVG,
+                    path: "devspin-setup/src/main.rs".to_string(),
+                    content: DEPS_SETUP_RS,
                 },
             ],
             service_configs: vec![ServiceConfig {
                 name: "frontend".to_string(),
                 service_type: "web".to_string(),
                 command: "cd frontend && npm run dev".to_string(),
-                working_dir: "./frontend".to_string(),
+                working_dir: "".to_string(),
+                setup_command: "cd devspin-setup && cargo run --release".to_string(),
                 health_check: HealthCheck {
                     type_entry: "http".to_string(),
                     port: 5173,
@@ -851,12 +990,21 @@ impl InitArgs {
                     path: "api/server.js".to_string(),
                     content: NODE_API_SERVER,
                 },
+                TemplateFile {
+                    path: "devspin-setup/Cargo.toml".to_string(),
+                    content: DEPS_SETUP_CARGO,
+                },
+                TemplateFile {
+                    path: "devspin-setup/src/main.rs".to_string(),
+                    content: DEPS_SETUP_RS,
+                },
             ],
             service_configs: vec![ServiceConfig {
                 name: "api".to_string(),
                 service_type: "api".to_string(),
                 command: "cd api && npm run dev".to_string(),
-                working_dir: "./api".to_string(),
+                working_dir: "".to_string(),
+                setup_command: "cd devspin-setup && cargo run --release".to_string(),
                 health_check: HealthCheck {
                     type_entry: "http".to_string(),
                     port: 3001,
@@ -885,12 +1033,21 @@ impl InitArgs {
                     path: "api/setup_venv.sh".to_string(),
                     content: PYTHON_VENV_SETUP,
                 },
+                TemplateFile {
+                    path: "devspin-setup/Cargo.toml".to_string(),
+                    content: DEPS_SETUP_CARGO,
+                },
+                TemplateFile {
+                    path: "devspin-setup/src/main.rs".to_string(),
+                    content: DEPS_SETUP_RS,
+                },
             ],
             service_configs: vec![ServiceConfig {
                 name: "api".to_string(),
                 service_type: "api".to_string(),
                 command: "cd api && ./setup_venv.sh && source venv/bin/activate && python3 main.py".to_string(),
-                working_dir: "./api".to_string(),
+                working_dir: "".to_string(),
+                setup_command: "cd devspin-setup && cargo run --release".to_string(),
                 health_check: HealthCheck {
                     type_entry: "http".to_string(),
                     port: 8000,
@@ -915,12 +1072,21 @@ impl InitArgs {
                     path: "api/src/main.rs".to_string(),
                     content: RUST_MAIN,
                 },
+                TemplateFile {
+                    path: "devspin-setup/Cargo.toml".to_string(),
+                    content: DEPS_SETUP_CARGO,
+                },
+                TemplateFile {
+                    path: "devspin-setup/src/main.rs".to_string(),
+                    content: DEPS_SETUP_RS,
+                },
             ],
             service_configs: vec![ServiceConfig {
                 name: "api".to_string(),
                 service_type: "api".to_string(),
                 command: "cd api && cargo run".to_string(),
-                working_dir: "./api".to_string(),
+                working_dir: "".to_string(),
+                setup_command: "cd devspin-setup && cargo run --release".to_string(),
                 health_check: HealthCheck {
                     type_entry: "http".to_string(),
                     port: 8080,
@@ -945,12 +1111,21 @@ impl InitArgs {
                     path: "api/main.go".to_string(),
                     content: GO_MAIN,
                 },
+                TemplateFile {
+                    path: "devspin-setup/Cargo.toml".to_string(),
+                    content: DEPS_SETUP_CARGO,
+                },
+                TemplateFile {
+                    path: "devspin-setup/src/main.rs".to_string(),
+                    content: DEPS_SETUP_RS,
+                },
             ],
             service_configs: vec![ServiceConfig {
                 name: "api".to_string(),
                 service_type: "api".to_string(),
                 command: "cd api && go run main.go".to_string(),
-                working_dir: "./api".to_string(),
+                working_dir: "".to_string(),
+                setup_command: "cd devspin-setup && cargo run --release".to_string(),
                 health_check: HealthCheck {
                     type_entry: "http".to_string(),
                     port: 9090,
@@ -966,13 +1141,23 @@ impl InitArgs {
             name: "fullstack".to_string(),
             services: vec!["frontend".to_string(), "api".to_string(), "database".to_string()],
             packages: vec!["nodejs@latest".to_string(), "npm@latest".to_string()],
-            files: vec![],
+            files: vec![
+                TemplateFile {
+                    path: "devspin-setup/Cargo.toml".to_string(),
+                    content: DEPS_SETUP_CARGO,
+                },
+                TemplateFile {
+                    path: "devspin-setup/src/main.rs".to_string(),
+                    content: DEPS_SETUP_RS,
+                },
+            ],
             service_configs: vec![
                 ServiceConfig {
                     name: "frontend".to_string(),
                     service_type: "web".to_string(),
                     command: "cd frontend && npm run dev".to_string(),
-                    working_dir: "./frontend".to_string(),
+                    working_dir: "".to_string(),
+                    setup_command: "cd devspin-setup && cargo run --release".to_string(),
                     health_check: HealthCheck {
                         type_entry: "http".to_string(),
                         port: 5173,
@@ -984,7 +1169,8 @@ impl InitArgs {
                     name: "api".to_string(),
                     service_type: "api".to_string(),
                     command: "cd api && npm run dev".to_string(),
-                    working_dir: "./api".to_string(),
+                    working_dir: "".to_string(),
+                    setup_command: "cd devspin-setup && cargo run --release".to_string(),
                     health_check: HealthCheck {
                         type_entry: "http".to_string(),
                         port: 3001,
@@ -996,7 +1182,8 @@ impl InitArgs {
                     name: "database".to_string(),
                     service_type: "database".to_string(),
                     command: "docker run -p 5432:5432 -e POSTGRES_PASSWORD=devspin postgres:15".to_string(),
-                    working_dir: "./database".to_string(),
+                    working_dir: "".to_string(),
+                    setup_command: "cd devspin-setup && cargo run --release".to_string(),
                     health_check: HealthCheck {
                         type_entry: "port".to_string(),
                         port: 5432,
@@ -1012,20 +1199,20 @@ impl InitArgs {
     async fn create_basic_frontend(&self, service_dir: &str) -> Result<()> {
         std::fs::write(format!("{}/package.json", service_dir), BASIC_FRONTEND_PACKAGE_JSON)?;
         std::fs::write(format!("{}/index.html", service_dir), BASIC_FRONTEND_HTML)?;
-        println!("   {} {}", "[FILE]".bright_green(), "Created basic frontend files");
+        println!("   {} {}", "[FILE]".bright_green(), format_args!("Created basic frontend files"));
         Ok(())
     }
 
     async fn create_basic_api(&self, service_dir: &str) -> Result<()> {
         std::fs::write(format!("{}/package.json", service_dir), BASIC_API_PACKAGE_JSON)?;
         std::fs::write(format!("{}/server.js", service_dir), BASIC_API_SERVER_JS)?;
-        println!("   {} {}", "[FILE]".bright_green(), "Created basic API files");
+        println!("   {} {}", "[FILE]".bright_green(), format_args!("Created basic API files"));
         Ok(())
     }
 
     async fn create_database(&self, service_dir: &str) -> Result<()> {
         std::fs::write(format!("{}/init.sql", service_dir), DATABASE_INIT_SQL)?;
-        println!("   {} {}", "[FILE]".bright_green(), "Created database initialization file");
+        println!("   {} {}", "[FILE]".bright_green(), format_args!("Created database initialization file"));
         Ok(())
     }
 
@@ -1034,7 +1221,7 @@ impl InitArgs {
             format!("{}/README.md", service_dir),
             format!("# {}\n\nService configuration.", service_name)
         )?;
-        println!("   {} {}", "[FILE]".bright_green(), format!("Created README for {}", service_name));
+        println!("   {} {}", "[FILE]".bright_green(), format_args!("Created README for {}", service_name));
         Ok(())
     }
 
@@ -1057,7 +1244,6 @@ impl InitArgs {
         }
     }
 }
-
 // ========== TEMPLATE CONSTANTS ==========
 
 
@@ -1285,7 +1471,6 @@ const REACT_TS_CONFIG_NODE: &str = r#"{
   "include": ["vite.config.ts"]
 }"#;
 
-
 const REACT_TS_CONFIG: &str = r#"{
   "compilerOptions": {
     "target": "ES2020",
@@ -1319,42 +1504,20 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   </React.StrictMode>,
 )"#;
 
-const REACT_SVG: &str = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8Y2lyY2xlIGN4PSIxNiIgY3k9IjE2IiByPSI0IiBmaWxsPSIjNjFkYWZiIi8+CiAgPGcgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNjFkYWZiIj4KICAgIDxlbGxpcHNlIGN4PSIxNiIgY3k9IjE2IiByeD0iMTAiIHJ5PSI0Ii8+CiAgICA8ZWxsaXBzZSBjeD0iMTYiIGN5PSIxNiIgcng9IjEwIiByeT0iNCIgdHJhbnNmb3JtPSJyb3RhdGUoNjAgMTYgMTYpIi8+CiAgICA8ZWxsaXBzZSBjeD0iMTYiIGN5PSIxNiIgcng9IjEwIiByeT0iNCIgdHJhbnNmb3JtPSJyb3RhdGUoMTIwIDE2IDE2KSIvPgogIDwvZz4KPC9zdmc+Cg==";
-
-const VITE_SVG: &str = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8Y2lyY2xlIGN4PSIxNiIgY3k9IjE2IiByPSIxNCIgZmlsbD0iIzY0NmNmZiIvPgogIDxwYXRoIGQ9Ik0xNiA4bDggMTRIOHoiIGZpbGw9IndoaXRlIi8+Cjwvc3ZnPgo=";
-
-
-
-
-const REACT_APP: &str = r#"import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import './App.css'
-
-function App() {
-  const [count, setCount] = useState(0)
-
+const REACT_APP: &str = r#"function App() {
   return (
-    <div className="App">
-      <div>
-        <a href="https://vitejs.dev" target="_blank">
-          <img src="/vite.svg" className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://reactjs.org" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
+    <div className="centered-app">
+      <section className="hero">
+        <div className="hero-content">
+          <h1 className="hero-title">
+            Welcome to Your DevSpin Project
+          </h1>
+          <p className="hero-subtitle">
+            Build amazing React applications with modern tools and best practices.<br />
+            Start creating something extraordinary today.
+          </p>
+        </div>
+      </section>
     </div>
   )
 }
@@ -1364,115 +1527,74 @@ export default App"#;
 const REACT_VITE_ENV: &str = r#"/// <reference types="vite/client" />"#;
 
 const REACT_INDEX_CSS: &str = r#":root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
+  --primary-color: #61dafb;
+  --primary-dark: #21a0c4;
+  --secondary-color: #646cff;
+  --text-primary: #2c3e50;
+  --text-secondary: #476582;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8fafc;
+  --border-color: #e2e8f0;
+  --gradient: linear-gradient(135deg, #61dafb 0%, #646cff 100%);
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
 }
 
 body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
   min-height: 100vh;
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
-}
-
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
-}"#;
-
-const REACT_APP_CSS: &str = r#".App {
+.centered-app {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
+.hero {
+  max-width: 800px;
+  padding: 2rem;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
+.hero-title {
+  font-size: 3.5rem;
+  font-weight: 800;
+  line-height: 1.1;
+  margin-bottom: 1.5rem;
+  background: var(--gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero-subtitle {
+  font-size: 1.25rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 2.5rem;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .hero-title {
+    font-size: 2.5rem;
   }
-}
-
-.App-header {
-  background-color: #282c34;
-  padding: 20px;
-  color: white;
-}
-
-.App-link {
-  color: #61dafb;
-}
-
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
+  
+  .hero-subtitle {
+    font-size: 1.1rem;
   }
-  to {
-    transform: rotate(360deg);
+  
+  .hero {
+    padding: 1rem;
   }
-}
-
-.card {
-  padding: 2em;
-}
-
-.read-the-docs {
-  color: #888;
 }"#;
 
 const REACT_HTML: &str = r#"<!doctype html>
@@ -1528,7 +1650,6 @@ const VUE_TS_CONFIG_NODE: &str = r#"{
   }
 }"#;
 
-
 const VUE_VITE_CONFIG: &str = r#"import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
@@ -1545,7 +1666,6 @@ export default defineConfig({
     }
   }
 })"#;
-
 
 const VUE_TS_CONFIG: &str = r#"{
   "compilerOptions": {
@@ -1575,26 +1695,99 @@ import App from './App.vue'
 
 createApp(App).mount('#app')"#;
 
-
 const VUE_APP: &str = r#"<template>
-  <div id="app">
-    <img alt="Vue logo" src="./assets/logo.png" width="125" height="125" />
-    <HelloWorld msg="Welcome to Your Devspin project!" />
+  <div id="app" class="centered-app">
+    <main class="main">
+      <section class="hero">
+        <div class="hero-content">
+          <h1 class="hero-title">
+            Welcome to Your DevSpin Project
+          </h1>
+          <p class="hero-subtitle">
+            Build amazing Vue.js applications with modern tools and best practices.<br>
+            Start creating something extraordinary today.
+          </p>
+        </div>
+      </section>
+    </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import HelloWorld from './components/HelloWorld.vue'
+// No reactive data needed for this simple template
 </script>
 
 <style>
-#app {
-  font-family: Avenir, Helvetica, Arial, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+:root {
+  --primary-color: #42b883;
+  --primary-dark: #369870;
+  --secondary-color: #647eff;
+  --text-primary: #2c3e50;
+  --text-secondary: #476582;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8fafc;
+  --border-color: #e2e8f0;
+  --gradient: linear-gradient(135deg, #42b883 0%, #647eff 100%);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+.centered-app {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
-  color: #2c3e50;
-  margin-top: 60px;
+}
+
+.hero {
+  max-width: 800px;
+  padding: 2rem;
+}
+
+.hero-title {
+  font-size: 3.5rem;
+  font-weight: 800;
+  line-height: 1.1;
+  margin-bottom: 1.5rem;
+  color: var(--text-primary);
+  background: var(--gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero-subtitle {
+  font-size: 1.25rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 2.5rem;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .hero-title {
+    font-size: 2.5rem;
+  }
+  
+  .hero-subtitle {
+    font-size: 1.1rem;
+  }
+  
+  .hero {
+    padding: 1rem;
+  }
 }
 </style>"#;
 
@@ -1606,26 +1799,6 @@ const VUE_HELLO_WORLD: &str = r#"<template>
       check out the
       <a href="https://cli.vuejs.org" target="_blank" rel="noopener">vue-cli documentation</a>.
     </p>
-    <h3>Installed CLI Plugins</h3>
-    <ul>
-      <li><a href="https://github.com/vuejs/vue-cli/tree/dev/packages/%40vue/cli-plugin-typescript" target="_blank" rel="noopener">typescript</a></li>
-    </ul>
-    <h3>Essential Links</h3>
-    <ul>
-      <li><a href="https://vuejs.org" target="_blank" rel="noopener">Core Docs</a></li>
-      <li><a href="https://forum.vuejs.org" target="_blank" rel="noopener">Forum</a></li>
-      <li><a href="https://chat.vuejs.org" target="_blank" rel="noopener">Community Chat</a></li>
-      <li><a href="https://twitter.com/vuejs" target="_blank" rel="noopener">Twitter</a></li>
-      <li><a href="https://news.vuejs.org" target="_blank" rel="noopener">News</a></li>
-    </ul>
-    <h3>Ecosystem</h3>
-    <ul>
-      <li><a href="https://router.vuejs.org" target="_blank" rel="noopener">vue-router</a></li>
-      <li><a href="https://vuex.vuejs.org" target="_blank" rel="noopener">vuex</a></li>
-      <li><a href="https://github.com/vuejs/vue-devtools#vue-devtools" target="_blank" rel="noopener">vue-devtools</a></li>
-      <li><a href="https://vue-loader.vuejs.org" target="_blank" rel="noopener">vue-loader</a></li>
-      <li><a href="https://github.com/vuejs/awesome-vue" target="_blank" rel="noopener">awesome-vue</a></li>
-    </ul>
   </div>
 </template>
 
@@ -1636,30 +1809,41 @@ defineProps<{
 </script>
 
 <style scoped>
-h3 {
-  margin: 40px 0 0;
+.hello {
+  text-align: center;
+  margin: 2rem 0;
 }
-ul {
-  list-style-type: none;
-  padding: 0;
+
+h1 {
+  font-size: 2.5rem;
+  margin-bottom: 1rem;
+  color: #2c3e50;
 }
-li {
-  display: inline-block;
-  margin: 0 10px;
+
+p {
+  font-size: 1.1rem;
+  color: #476582;
+  line-height: 1.6;
 }
+
 a {
   color: #42b983;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
 }
 </style>"#;
 
 const VUE_STYLE_CSS: &str = r#":root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
   color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  color: #2c3e50;
+  background-color: #ffffff;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -1668,69 +1852,13 @@ const VUE_STYLE_CSS: &str = r#":root {
   -webkit-text-size-adjust: 100%;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
-}
-
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
   min-height: 100vh;
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
-}
-
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
-}
-
-.card {
-  padding: 2em;
-}
-
 #app {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
+  min-height: 100vh;
 }"#;
 
 const VUE_VITE_ENV: &str = r#"/// <reference types="vite/client" />
@@ -1778,7 +1906,6 @@ const SVELTE_PACKAGE_JSON: &str = r#"{
   }
 }"#;
 
-
 const SVELTE_TS_CONFIG_NODE: &str = r#"{
   "extends": "@tsconfig/node18/tsconfig.json",
   "include": [
@@ -1815,52 +1942,91 @@ export default defineConfig({
 })"#;
 
 const SVELTE_APP_SVELTE: &str = r#"<script lang="ts">
-  let count = 0;
-
-  function increment() {
-    count += 1;
-  }
+  // Simple centered welcome page - no reactive data needed
 </script>
 
-<main>
-  <h1>Welcome to Svelte + Devspin!</h1>
-  <p>This is your new Svelte application.</p>
-  
-  <div class="card">
-    <button on:click={increment}>
-      Count is {count}
-    </button>
-  </div>
-  
-  <p>
-    Edit <code>src/App.svelte</code> to get started.
-  </p>
+<main class="centered-app">
+  <section class="hero">
+    <div class="hero-content">
+      <h1 class="hero-title">
+        Welcome to Your DevSpin Project
+      </h1>
+      <p class="hero-subtitle">
+        Build amazing Svelte applications with modern tools and best practices.<br>
+        Start creating something extraordinary today.
+      </p>
+    </div>
+  </section>
 </main>
 
 <style>
-  main {
+  :root {
+    --primary-color: #ff3e00;
+    --primary-dark: #cc3200;
+    --secondary-color: #676778;
+    --text-primary: #2c3e50;
+    --text-secondary: #476582;
+    --bg-primary: #ffffff;
+    --bg-secondary: #f8fafc;
+    --border-color: #e2e8f0;
+    --gradient: linear-gradient(135deg, #ff3e00 0%, #676778 100%);
+  }
+
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  .centered-app {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     text-align: center;
-    padding: 1em;
-    max-width: 240px;
-    margin: 0 auto;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
   }
 
-  h1 {
-    color: #ff3e00;
-    text-transform: uppercase;
-    font-size: 4em;
-    font-weight: 100;
+  .hero {
+    max-width: 800px;
+    padding: 2rem;
   }
 
-  @media (min-width: 640px) {
-    main {
-      max-width: none;
+  .hero-title {
+    font-size: 3.5rem;
+    font-weight: 800;
+    line-height: 1.1;
+    margin-bottom: 1.5rem;
+    background: var(--gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .hero-subtitle {
+    font-size: 1.25rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin-bottom: 2.5rem;
+  }
+
+  /* Responsive Design */
+  @media (max-width: 768px) {
+    .hero-title {
+      font-size: 2.5rem;
+    }
+    
+    .hero-subtitle {
+      font-size: 1.1rem;
+    }
+    
+    .hero {
+      padding: 1rem;
     }
   }
 </style>"#;
-
-// And add the App.svelte file to the template files array:
-
 
 const SVELTE_CONFIG: &str = r#"import { vitePreprocess } from '@sveltejs/vite-plugin-svelte'
 export default {
@@ -1868,7 +2034,6 @@ export default {
   // for more information about preprocessors
   preprocess: vitePreprocess(),
 }"#;
-
 
 const SVELTE_TS_CONFIG: &str = r#"{
   "extends": "@tsconfig/svelte/tsconfig.json",
@@ -1919,8 +2084,8 @@ const SVELTE_APP_CSS: &str = r#":root {
   font-weight: 400;
 
   color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  color: #2c3e50;
+  background-color: #ffffff;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -1931,17 +2096,11 @@ const SVELTE_APP_CSS: &str = r#":root {
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
   min-height: 100vh;
 }
 
 #app {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+  min-height: 100vh;
 }"#;
 
 const NODE_API_SERVER: &str = r#"const express = require('express');
@@ -2008,7 +2167,7 @@ echo To activate manually, run: venv\Scripts\activate.bat
 const PYTHON_API_SERVICE_CONFIG: &str = r#"  - name: "api"
     service_type: "api"
     command: "cd api && ./setup_venv.sh && source venv/bin/activate && python main.py"
-    working_dir: "./api"
+    working_dir: ""
     health_check:
       type_entry: "http"
       port: 8000
@@ -2217,7 +2376,7 @@ const DATABASE_INIT_SQL: &str = "-- Database initialization script\nCREATE TABLE
 const NEXTJS_SERVICE_CONFIG: &str = r#"  - name: "frontend"
     service_type: "web"
     command: "cd frontend && npm run dev"
-    working_dir: "./frontend"
+    working_dir: ""
     health_check:
       type_entry: "http"
       port: 3000
@@ -2227,7 +2386,7 @@ const NEXTJS_SERVICE_CONFIG: &str = r#"  - name: "frontend"
 const REACT_SERVICE_CONFIG: &str = r#"  - name: "frontend"
     service_type: "web"
     command: "cd frontend && npm run dev"
-    working_dir: "./frontend"
+    working_dir: ""
     health_check:
       type_entry: "http"
       port: 5173
@@ -2237,7 +2396,7 @@ const REACT_SERVICE_CONFIG: &str = r#"  - name: "frontend"
 const VUE_SERVICE_CONFIG: &str = r#"  - name: "frontend"
     service_type: "web"
     command: "cd frontend && npm run dev"
-    working_dir: "./frontend"
+    working_dir: ""
     health_check:
       type_entry: "http"
       port: 5173
@@ -2247,7 +2406,7 @@ const VUE_SERVICE_CONFIG: &str = r#"  - name: "frontend"
 const SVELTE_SERVICE_CONFIG: &str = r#"  - name: "frontend"
     service_type: "web"
     command: "cd frontend && npm run dev"
-    working_dir: "./frontend"
+    working_dir: ""
     health_check:
       type_entry: "http"
       port: 5173
@@ -2257,7 +2416,7 @@ const SVELTE_SERVICE_CONFIG: &str = r#"  - name: "frontend"
 const FRONTEND_SERVICE_CONFIG: &str = r#"  - name: "frontend"
     service_type: "web"
     command: "cd frontend && npm run dev"
-    working_dir: "./frontend"
+    working_dir: ""
     health_check:
       type_entry: "http"
       port: 5173
@@ -2279,7 +2438,7 @@ const NODE_API_PACKAGE_JSON: &str = r#"{
 const NODE_API_SERVICE_CONFIG: &str = r#"  - name: "api"
     service_type: "api"
     command: "cd api && npm run dev"
-    working_dir: "./api"
+    working_dir: ""
     health_check:
       type_entry: "http"
       port: 3001
@@ -2290,7 +2449,7 @@ const NODE_API_SERVICE_CONFIG: &str = r#"  - name: "api"
 const RUST_API_SERVICE_CONFIG: &str = r#"  - name: "api"
     service_type: "api"
     command: "cd api && cargo run"
-    working_dir: "./api"
+    working_dir: ""
     health_check:
       type_entry: "http"
       port: 8080
@@ -2300,7 +2459,7 @@ const RUST_API_SERVICE_CONFIG: &str = r#"  - name: "api"
 const GO_API_SERVICE_CONFIG: &str = r#"  - name: "api"
     service_type: "api"
     command: "cd api && go run main.go"
-    working_dir: "./api"
+    working_dir: ""
     health_check:
       type_entry: "http"
       port: 9090
@@ -2310,7 +2469,7 @@ const GO_API_SERVICE_CONFIG: &str = r#"  - name: "api"
 const API_SERVICE_CONFIG: &str = r#"  - name: "api"
     service_type: "api"
     command: "cd api && npm run dev"
-    working_dir: "./api"
+    working_dir: ""
     health_check:
       type_entry: "http"
       port: 3001
@@ -2320,7 +2479,7 @@ const API_SERVICE_CONFIG: &str = r#"  - name: "api"
 const DATABASE_SERVICE_CONFIG: &str = r#"  - name: "database"
     service_type: "database"
     command: "docker run -p 5432:5432 -e POSTGRES_PASSWORD=Devspin postgres:15"
-    working_dir: "./database"
+    working_dir: ""
     health_check:
       type_entry: "port"
       port: 5432
@@ -2330,7 +2489,7 @@ const DATABASE_SERVICE_CONFIG: &str = r#"  - name: "database"
 const CACHE_SERVICE_CONFIG: &str = r#"  - name: "cache"
     service_type: "cache"
     command: "docker run -p 6379:6379 redis:7-alpine"
-    working_dir: "./cache"
+    working_dir: ""
     health_check:
       type_entry: "port"
       port: 6379
@@ -2340,7 +2499,7 @@ const CACHE_SERVICE_CONFIG: &str = r#"  - name: "cache"
 const AUTH_SERVICE_CONFIG: &str = r#"  - name: "auth"
     service_type: "api"
     command: "echo 'Auth service starting'"
-    working_dir: "./auth"
+    working_dir: ""
     health_check:
       type_entry: "none"
     dependencies: ["database"]"#;
@@ -2348,7 +2507,7 @@ const AUTH_SERVICE_CONFIG: &str = r#"  - name: "auth"
 const GENERIC_SERVICE_CONFIG: &str = r#"  - name: "generic"
     service_type: "service"
     command: "echo 'Service starting'"
-    working_dir: "./generic"
+    working_dir: ""
     health_check:
       type_entry: "none"
     dependencies: []"#;

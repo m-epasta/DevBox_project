@@ -38,17 +38,17 @@ pub struct StartArgs {
     pub skip: Option<Vec<String>>
 }
 
+#[allow(clippy::await_holding_lock)]
 impl StartArgs {
     pub async fn execute(&self) -> Result<()> {
-        println!("{} {}", "🚀".green(), format!("Starting project: {}", self.name).bold());
+        println!("{}", format!("Starting project: {}", self.name).bold());
 
         self.validate_args()?;
 
         let default_path = format!("{}/devspin.yaml", self.name);
         if !std::path::Path::new(&default_path).exists() {
             return Err(ToolError::ConfigError(format!(
-                "{} Project '{}' not found at: {}", 
-                "❌".red(), self.name, default_path
+                "Project '{}' not found at: {}", self.name, default_path  
             )))
         }
         let project = self.load_project(&default_path).await?;
@@ -57,96 +57,172 @@ impl StartArgs {
             return self.dry_run(&project);
         }
 
+        // Load environment file if specified
         if let Some(env) = &self.env {
-            println!("{} {}", "📁".cyan(), format!("Loading environment from: {}", env).dimmed());
+            println!("{}", format!("Loading environment from: {}", env).dimmed());
+            self.load_env_file(env).await?;
+            
+            if self.verbose {
+                // FIX: Use if-let without collect() to avoid the type error
+                let env_count = std::env::vars().count();
+                println!("{} {} environment variables loaded", "✓".green(), env_count.to_string().cyan());
+            }
         }
 
         if self.verbose {
-            println!("{} {}", "🔍".yellow(), "Verbose output enabled".dimmed());
+            println!("{}", "Verbose output enabled".dimmed());
+            self.show_verbose_configuration(&project);
         }
 
         if self.background {
-            println!("{} {}", "⚙️".purple(), "Running in background mode".bold());
+            println!("{}", "Running in background mode".bold());
             return self.start_in_background(project).await;
         }
 
         if let Some(only_services) = &self.only {
-            println!("{} {}", "🎯".blue(), format!("Starting only: {}", only_services.join(", ")).bold());
+            println!("{}", format!("Starting only: {}", only_services.join(", ")).bold());
         }
 
         if let Some(skip_services) = &self.skip {
-            println!("{} {}", "⏭".yellow(), format!("Skipping: {}", skip_services.join(", ")).dimmed());
+            println!("{}", format!("Skipping: {}", skip_services.join(", ")).dimmed());
         }
 
         // For foreground mode, use global state directly
-        let mut process_state = get_global_state();
+        let mut process_state: std::sync::MutexGuard<'static, ProcessState> = get_global_state();
         self.start_services(&project, &mut process_state).await
     }
 
     async fn load_project(&self, path: &str) -> Result<ProjectConfig> {
         debug!("Loading project from: {}", path);
         let project = ProjectConfig::from_file(path)?;
-        println!("{} {}", "📦".green(), format!("Loaded project: {}", project.name).bold());
+        println!("{}", format!("Loaded project: {}", project.name).bold());
         Ok(project)
     }
 
     async fn load_env_file(&self, env_file: &str) -> Result<()> {
         dotenvy::from_filename(env_file)
-            .map_err(|e| ToolError::ConfigError(format!("{} Failed to load env file {}: {}", "❌".red(), env_file, e)))?;
+            .map_err(|e| ToolError::ConfigError(format!("Failed to load env file {}: {}", env_file, e)))?;
         Ok(())
     }
 
+    fn show_verbose_configuration(&self, project: &ProjectConfig) {
+        println!();
+        println!("{}", "CONFIGURATION DETAILS:".cyan().bold());
+        println!("  {} {}", "Config path:".dimmed(), format_args!("./{}/devspin.yaml", self.name));
+        println!("  {} {}", "Project:".dimmed(), project.name.cyan());
+        println!("  {} {:?}", "Description:".dimmed(), project.description);
+        
+        if let Some(env) = &self.env {
+            println!("  {} {}", "Environment file:".dimmed(), env.cyan());
+        }
+        
+        println!("  {} only={:?}, skip={:?}", "Service filters:".dimmed(), self.only, self.skip);
+        
+        println!("  {}", "Commands:".cyan().bold());
+        println!("    {} {}", "Dev:".green(), project.commands.start.dev);
+        if let Some(test) = &project.commands.start.test {
+            println!("    {} {}", "Test:".yellow(), test);
+        }
+        println!("    {} {}", "Build:".blue(), project.commands.start.build);
+
+        if let Some(clean) = &project.commands.start.clean {
+            println!("    {} {}", "Clean:".red(), clean);
+        }
+        
+        if let Some(env_vars) = &project.environment {
+            println!("  {} ({})", "Environment variables:".cyan().bold(), env_vars.len());
+            for (key, value) in env_vars {
+                println!("    {} {}={}", "•".dimmed(), key.blue(), value.dimmed());
+            }
+        }
+        
+        if let Some(hooks) = &project.hooks {
+            println!("  {}", "Hooks:".cyan().bold());
+            if let Some(pre_start) = &hooks.pre_start {
+                println!("    {} {}", "Pre-start:".yellow(), pre_start);
+            }
+            if let Some(post_start) = &hooks.post_start {
+                println!("    {} {}", "Post-start:".green(), post_start);
+            }
+            if let Some(pre_stop) = &hooks.pre_stop {
+                println!("    {} {}", "Pre-stop:".red(), pre_stop);
+            }
+            if let Some(post_stop) = &hooks.post_stop {
+                println!("    {} {}", "Post-stop:".red(), post_stop);
+            }
+        }
+        
+        if let Some(services) = &project.services {
+            println!();
+            println!("  {}", "SERVICES:".cyan().bold());
+            for service in services {
+                let should_start = self.should_start_service(service);
+                let status = if should_start { 
+                    "START".green()
+                } else { 
+                    "SKIP".yellow()
+                };
+                
+                println!("  {} {}:", status, service.name.bold());
+                println!("    {} {}", "Type:".dimmed(), service.service_type.cyan());
+                println!("    {} {}", "Command:".dimmed(), service.command.dimmed());
+                
+                if let Some(dir) = &service.working_dir {
+                    println!("    {} {}", "Working directory:".dimmed(), dir.blue());
+                }
+                
+                if !service.dependencies.is_empty() {
+                    println!("    {} {:?}", "Dependencies:".dimmed(), service.dependencies);
+                }
+                
+                if let Some(health_check) = &service.health_check {
+                    println!("    {}", "Health check:".yellow().bold());
+                    println!("      {} {}", "Type:".dimmed(), health_check.type_entry.cyan());
+                    if let Some(port) = health_check.port {
+                        println!("      {} {}", "Port:".dimmed(), port.to_string().blue());
+                    }
+                    if !health_check.http_target.is_empty() {
+                        println!("      {} {}", "HTTP target:".dimmed(), health_check.http_target.green());
+                    }
+                }
+                
+                if !should_start {
+                    let reason = if let Some(only_services) = &self.only {
+                        if !only_services.contains(&service.name) {
+                            "filtered out by --only"
+                        } else {
+                            "unknown"
+                        }
+                    } else if let Some(skip_services) = &self.skip {
+                        if skip_services.contains(&service.name) {
+                            "filtered out by --skip"
+                        } else {
+                            "unknown"
+                        }
+                    } else {
+                        "unknown"
+                    };
+                    println!("    {} {}", "Status:".dimmed(), format!("SKIPPED ({})", reason).yellow());
+                }
+                
+                println!();
+            }
+            
+            println!("{}", "---".dimmed());
+            println!("  {} {}", "Total services:".dimmed(), services.len().to_string().cyan());  
+            let starting_count = services.iter().filter(|s| self.should_start_service(s)).count();
+            println!("  {} {}", "Starting:".dimmed(), starting_count.to_string().green());
+            println!("  {} only={:?}, skip={:?}", "Filters applied:".dimmed(), self.only, self.skip);
+        }
+        println!();
+    }
+
     pub fn dry_run(&self, project: &ProjectConfig) -> Result<()> {
-        println!("{}", "🌵 DRY RUN".bold().yellow());
-        println!("{} {}", "📋".yellow(), format!("Would start project: {}", project.name).bold());
+        println!("{}", "DRY RUN".bold().yellow());
+        println!("{}", format!("Would start project: {}", project.name).bold());
 
         if self.verbose {
-            println!("{}", "   CONFIGURATION DETAILS:".cyan().bold());
-            println!("   {} {}", "Config path:".dimmed(), format!("./{}/devspin.yaml", self.name));
-            println!("   {} {}", "Project:".dimmed(), project.name.cyan());
-            println!("   {} {:?}", "Description:".dimmed(), project.description);
-            
-            if let Some(env) = &self.env {
-                println!("   {} {}", "Environment file:".dimmed(), env.cyan());
-            }
-            
-            println!("   {} only={:?}, skip={:?}", "Service filters:".dimmed(), self.only, self.skip);
-            
-            println!("   {}", "Commands:".cyan().bold());
-            println!("     {} {}", "Dev:".green(), project.commands.start.dev);
-            if let Some(test) = &project.commands.start.test {
-                println!("     {} {}", "Test:".yellow(), test);
-            }
-            println!("     {} {}", "Build:".blue(), project.commands.start.build);
-
-            if let Some(clean) = &project.commands.start.clean {
-                println!("     {} {}", "Clean:".red(), clean);
-            }
-            
-            if let Some(env_vars) = &project.environment {
-                println!("   {} ({})", "Environment variables:".cyan().bold(), env_vars.len());
-                for (key, value) in env_vars {
-                    println!("     {} {}={}", "•".dimmed(), key.blue(), value.dimmed());
-                }
-            }
-            
-            if let Some(hooks) = &project.hooks {
-                println!("   {}", "Hooks:".cyan().bold());
-                if let Some(pre_start) = &hooks.pre_start {
-                    println!("     {} {}", "Pre-start:".yellow(), pre_start);
-                }
-                if let Some(post_start) = &hooks.post_start {
-                    println!("     {} {}", "Post-start:".green(), post_start);
-                }
-                if let Some(pre_stop) = &hooks.pre_stop {
-                    println!("     {} {}", "Pre-stop:".red(), pre_stop);
-                }
-                if let Some(post_stop) = &hooks.post_stop {
-                    println!("     {} {}", "Post-stop:".red(), post_stop);
-                }
-            }
-            
-            println!();
+            self.show_verbose_configuration(project);
         }
 
         if self.background {
@@ -157,49 +233,36 @@ impl StartArgs {
         
         if let Some(services) = &project.services {
             println!();
-            println!("  {}", "SERVICES:".cyan().bold());
+            println!("{}", "SERVICES:".cyan().bold());
             for service in services {
                 let should_start = self.should_start_service(service);
-                let status = if should_start { "✅" } else { "❌" };
                 
                 if self.verbose {
+                    let status = if should_start { 
+                        format!("{}: {}", "STATUS".white(), "START".green())
+                    } else { 
+                        format!("{}: {}", "STATUS".white(), "SKIP".red())
+                    };
+                    
                     println!("  {} {}:", status, service.name.bold());
-                    println!("     {} {}", "Type:".dimmed(), service.service_type.cyan());
-                    println!("     {} {}", "Command:".dimmed(), service.command.dimmed());
-                    
-                    if let Some(dir) = &service.working_dir {
-                        println!("     {} {}", "Working directory:".dimmed(), dir.blue());
-                    }
-                    
-                    println!("     {} {:?}", "Dependencies:".dimmed(), service.dependencies);
-                    
-                    if let Some(health_check) = &service.health_check {
-                        println!("     {}", "Health check:".yellow().bold());
-                        println!("       {} {}", "Type:".dimmed(), health_check.type_entry.cyan());
-                        if let Some(port) = health_check.port {
-                            println!("       {} {}", "Port:".dimmed(), port.to_string().blue());
-                        }
-                        if !health_check.http_target.is_empty() {
-                            println!("       {} {}", "HTTP target:".dimmed(), health_check.http_target.green());
-                        }
-                    }
+                    println!("    {} {}", "Command:".dimmed(), service.command.dimmed());
                     
                     if !should_start {
-                        println!("     {} {}", "Status:".dimmed(), "SKIPPED (filtered out)".yellow());
+                        println!("    {} {}", "Status:".dimmed(), "SKIPPED (filtered out)".yellow());
                     }
-                    
                     println!();
                 } else if should_start {
-                    println!("  {} {}: {}", "✅".green(), service.name.bold(), service.command.dimmed());
+                    println!("  {} {}: {}", "START:".green(), service.name.bold(), service.command.dimmed());
                 } else {
-                    println!("  {} {}: {}", "❌".red(), service.name.dimmed(), "(skipped)".yellow());
+                    println!("  {} {}: {}", "SKIP:".red(), service.name.dimmed(), "(filtered out)".yellow());
                 }
             }
             
             if self.verbose {
                 println!("{}", "---".dimmed());
-                println!("{} {}", "Total services:".dimmed(), services.len().to_string().cyan());  
-                println!("{} only={:?}, skip={:?}", "Filters applied:".dimmed(), self.only, self.skip);
+                println!("  {} {}", "Total services:".dimmed(), services.len().to_string().cyan());  
+                let starting_count = services.iter().filter(|s| self.should_start_service(s)).count();
+                println!("  {} {}", "Would start:".dimmed(), starting_count.to_string().green());
             }
         }
 
@@ -237,6 +300,10 @@ impl StartArgs {
             command.env(key, value);
         }
         
+        if self.verbose {
+            debug!("Spawning command: sh -c '{}' in directory: {}", service.command, working_dir);
+        }
+        
         let child = command.spawn()?;
         Ok(child)
     }
@@ -245,15 +312,57 @@ impl StartArgs {
         let env_vars = project.environment.clone().unwrap_or_default();
         
         if let Some(services) = &project.services {
-            println!("{}", "🔄 Starting services...".cyan());
+            println!("{}", "Starting services...".cyan());
 
             let sorted_services = self.sort_services_by_dependencies(services);
             
+            if self.verbose {
+                println!("  {} services in dependency order:", "Starting".green());
+                for service in &sorted_services {
+                    if self.should_start_service(service) {
+                        print!("  → {}", service.name.bold());
+                        if !service.dependencies.is_empty() {
+                            print!(" {} {:?}", "depends on:".dimmed(), service.dependencies);
+                        }
+                        println!();
+                    }
+                }
+                println!();
+            }
+            
             for service in sorted_services {  
                 if self.should_start_service(service) {
+                    if self.verbose {
+                        println!("{}", "─".repeat(50).dimmed());
+                    }
+                    
                     self.wait_for_dependencies(service, &*process_state, &project.name).await?;
 
-                    println!("{} {}", "🚀".green(), format!("Starting service: {}", service.name).bold());
+                    println!("{}", format!("Starting service: {}", service.name).bold());
+                    
+                    if self.verbose {
+                        println!("  {} {}", "Type:".dimmed(), service.service_type.cyan());
+                        println!("  {} {}", "Command:".dimmed(), service.command.dimmed());
+                        
+                        if let Some(dir) = &service.working_dir {
+                            println!("  {} {}", "Working directory:".dimmed(), dir.blue());
+                        }
+                        
+                        if !service.dependencies.is_empty() {
+                            println!("  {} {:?}", "Dependencies:".dimmed(), service.dependencies);
+                        }
+                        
+                        if let Some(health_check) = &service.health_check {
+                            println!("  {}", "Health check:".yellow().bold());
+                            println!("    {} {}", "Type:".dimmed(), health_check.type_entry.cyan());
+                            if let Some(port) = health_check.port {
+                                println!("    {} {}", "Port:".dimmed(), port.to_string().blue());
+                            }
+                            if !health_check.http_target.is_empty() {
+                                println!("    {} {}", "HTTP target:".dimmed(), health_check.http_target.green());
+                            }
+                        }
+                    }
                     
                     // RESOLVE the working directory relative to project base
                     let working_dir = if let Some(service_dir) = &service.working_dir {
@@ -271,7 +380,7 @@ impl StartArgs {
                     process_state.add_process(child, &service.name, &project.name, &service.command)?;
                     
                     println!("{} {} {} {}", 
-                        "✅".green(), 
+                        "✓".green(), 
                         format!("Started service: {}", service.name).bold(),
                         format!("(PID: {})", pid).dimmed(),
                         format!("in directory: {}", working_dir).blue()
@@ -280,18 +389,31 @@ impl StartArgs {
                     if let Some(health_check) = &service.health_check {
                         self.wait_for_health_check(service, health_check).await?;
                     }
+                    
+                    if self.verbose {
+                        println!("  {} {}", "Status:".dimmed(), "RUNNING".green());
+                        println!();
+                    }
+                } else if self.verbose {
+                    println!("{} {}: {}", "SKIP".yellow(), service.name.dimmed(), "(filtered out)".yellow());
+                    println!();
                 }
             }
         }
         
-        println!("{}", "🎉 All services started successfully!".green().bold());
-        println!("{} {}", "📊".cyan(), format!("Tracking {} processes in memory", process_state.process_count()).dimmed());
+        println!("{}", "─".repeat(50).dimmed());
+        println!("{}", "All services started successfully!".green().bold());
+        println!("{}", format!("Tracking {} processes in memory", process_state.process_count()).dimmed());
         
         Ok(())
     }
 
     async fn start_in_background(&self, project: ProjectConfig) -> Result<()> {
-        println!("{} {}", "⚙️".purple(), format!("Starting project '{}' in background mode...", project.name).bold());
+        println!("{}", format!("Starting project '{}' in background mode...", project.name).bold());
+
+        if self.verbose {
+            self.show_verbose_configuration(&project);
+        }
 
         // Pre-collect all the services we need to start
         let services_to_start: Vec<Service> = if let Some(services) = &project.services {
@@ -303,14 +425,34 @@ impl StartArgs {
             Vec::new()
         };
 
+        if services_to_start.is_empty() {
+            println!("{}", "No services to start".yellow());
+            return Ok(());
+        }
+
         let env_vars = project.environment.clone().unwrap_or_default();
         let project_name = project.name.clone();
 
-        // Start each service and track it immediately
+        if self.verbose {
+            println!("  {} services to start in background:", services_to_start.len().to_string().cyan());
+            for service in &services_to_start {
+                println!("    • {}: {}", service.name.bold(), service.command.dimmed());
+            }
+            println!();
+        }
+
+        // Get ONE global state instance for the entire operation
+        let mut process_state = get_global_state();
+        
+        // Start each service and track it
         for service in services_to_start {
-            println!("{} {}", "🔧".blue(), format!("Starting background service: {}", service.name).bold());
+            println!("{}", format!("Starting background service: {}", service.name).bold());
             
-            // RESOLVE working directory for background mode too
+            if self.verbose {
+                println!("  {} {}", "Command:".dimmed(), service.command.dimmed());
+            }
+            
+            // RESOLVE working directory
             let working_dir = if let Some(service_dir) = &service.working_dir {
                 project.resolve_path(service_dir).to_string_lossy().to_string()
             } else {
@@ -319,27 +461,31 @@ impl StartArgs {
                     .unwrap_or_else(|| ".".to_string())
             };
             
-            // FIX: Pass all 3 arguments to spawn_service_command
             match self.spawn_service_command(&service, &env_vars, &working_dir).await {
                 Ok(child) => {
                     let pid = child.id();
                     
-                    // Store in global state - quick operation, no await points
-                    let mut process_state = get_global_state();
-                    if let Err(e) = process_state.add_process(child, &service.name, &project_name, &service.command) {
-                        eprintln!("{} {}", "❌".red(), format!("Failed to track service {}: {}", service.name, e).red());
-                    } else {
-                        println!("{} {} {} {}", 
-                            "✅".green(), 
-                            format!("Started background service: {}", service.name).bold(),
-                            format!("(PID: {})", pid).dimmed(),
-                            format!("in directory: {}", working_dir).blue()
-                        );
+                    // Add to the SAME global state instance (no race condition)
+                    match process_state.add_process(child, &service.name, &project_name, &service.command) {
+                        Ok(()) => {
+                            println!("{} {} {} {}", 
+                                "✓".green(), 
+                                format!("Started background service: {}", service.name).bold(),
+                                format!("(PID: {})", pid).dimmed(),
+                                format!("in directory: {}", working_dir).blue()
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("{} {}", "ERROR:".red(), format!("Failed to track service {}: {}", service.name, e).red());
+                            // Kill the process since we failed to track it
+                            let _ = std::process::Command::new("kill")
+                                .arg(pid.to_string())
+                                .output();
+                        }
                     }
-                    // process_state drops here, releasing the mutex
                 }
                 Err(e) => {
-                    eprintln!("{} {}", "❌".red(), format!("Failed to start service {}: {}", service.name, e).red());
+                    eprintln!("{} {}", "ERROR".red(), format!("Failed to start service {}: {}", service.name, e).red());
                 }
             }
             
@@ -347,26 +493,27 @@ impl StartArgs {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
 
-        println!("{} {}", "✅".green(), format!("Project '{}' successfully started in background mode", project_name).bold());
-        println!("{} {}", "📊".cyan(), "Check status: devspin status".dimmed());
-        println!("{} {}", "🛑".red(), format!("Stop services: devspin stop {}", project_name).dimmed());
+        // Show final count before releasing the lock
+        let final_count = process_state.process_count();
+        println!("{} {}", "SUCCESS:".green(), format!("Project '{}' successfully started in background mode", project_name).bold());
+        println!("{}", format!("Tracking {} processes in memory", final_count).dimmed());
+        println!("{}", "Check status: devspin status".dimmed());
+        println!("{} {}", "HELP:".red(), format!("Stop services: devspin stop {}", project_name).dimmed());
         
         Ok(())
     }
-
     fn sort_services_by_dependencies<'a>(&self, services: &'a [Service]) -> Vec<&'a Service> {
         let mut sorted = Vec::new();
         let mut visited = std::collections::HashSet::new();
 
         for service in services {
-            self.visit_service(service, services, &mut visited, &mut sorted);
+            Self::visit_service(service, services, &mut visited, &mut sorted);
         }
         
         sorted
     }
 
     fn visit_service<'a>(
-        &self,
         service: &'a Service,
         all_services: &'a [Service],
         visited: &mut std::collections::HashSet<&'a str>,
@@ -380,7 +527,7 @@ impl StartArgs {
 
         for dep_name in &service.dependencies {
             if let Some(dep_service) = all_services.iter().find(|s| &s.name == dep_name) {
-                self.visit_service(dep_service, all_services, visited, sorted);
+                Self::visit_service(dep_service, all_services, visited, sorted);
             }
         }
 
@@ -390,15 +537,20 @@ impl StartArgs {
     async fn wait_for_dependencies(&self, service: &Service, process_state: &ProcessState, project_name: &str) -> Result<()> {
         for dep_name in &service.dependencies {
             if !process_state.is_service_running(project_name, dep_name) {
-                println!("{} {}", "⏳".yellow(), format!("Waiting for dependency: {} -> {}", service.name, dep_name).dimmed());
+                println!("{}", format!("Waiting for dependency: {} → {}", service.name, dep_name).dimmed());
+                if self.verbose {
+                    println!("  {} {}", "Dependency not yet ready:".yellow(), dep_name);
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            } else if self.verbose {
+                println!("  {} {}", "Dependency ready:".green(), dep_name);
             }
         }
         Ok(())
     }
 
     async fn wait_for_health_check(&self, service: &Service, health_check: &crate::configs::yaml_parser::HealthCheck) -> Result<()> {
-        println!("{} {}", "❤️".green(), format!("Waiting for health check: {}", service.name).dimmed());
+        println!("{}: {}", ("Waiting for health check").to_string().dimmed(), service.name.to_string().cyan());
 
         match health_check.type_entry.as_str() {
             "http" => {
@@ -408,23 +560,23 @@ impl StartArgs {
                 self.wait_for_port_health_check(health_check).await?;
             }
             _ => {
-                println!("{} {}", "⚠️".yellow(), format!("Unrecognized health check type: {}", health_check.type_entry))
+                println!("{}", format_args!("Unrecognized health check type: {}", health_check.type_entry))
             }
         }
 
-        println!("{} {}", "✅".green(), format!("Health check passed: {}", service.name).bold());
+        println!("{} {}", "✓".green(), format!("Health check passed: {}", service.name).bold());
         Ok(())
     }
 
     async fn wait_for_http_health_check(&self, health_check: &crate::configs::yaml_parser::HealthCheck) -> Result<()> {
-        println!("   {} {}", "🌐".cyan(), format!("HTTP check: {}", health_check.http_target).dimmed());
+        println!("   {} {}: {}", "🌐".cyan(), "HTTP check".to_string().dimmed(), health_check.http_target.to_string().cyan().bold());
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         Ok(())
     }
 
     async fn wait_for_port_health_check(&self, health_check: &crate::configs::yaml_parser::HealthCheck) -> Result<()> {
         if let Some(port) = health_check.port {
-            println!("   {} {}", "🔌".blue(), format!("Port check: {}", port).dimmed()); 
+            println!("   {}", format!("Port check: {}", port).dimmed()); 
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
         Ok(())
@@ -433,7 +585,7 @@ impl StartArgs {
     fn validate_args(&self) -> Result<()> {
         if self.only.is_some() && self.skip.is_some() {
             return Err(ToolError::ConfigError(
-                format!("{} Cannot use both --only and --skip filters simultaneously", "❌".red())
+                format!("{} Cannot use both --only and --skip filters simultaneously", "ERROR:".red())
             ));
         }
         
@@ -442,7 +594,7 @@ impl StartArgs {
             for service in only_services {
                 if service.trim().is_empty() {
                     return Err(ToolError::ConfigError(
-                        format!("{} Empty service name in --only filter", "❌".red())
+                        format!("{} Empty service name in --only filter", "ERROR:".red())
                     ));
                 }
             }
@@ -452,7 +604,7 @@ impl StartArgs {
             for service in skip_services {
                 if service.trim().is_empty() {
                     return Err(ToolError::ConfigError(
-                        format!("{} Empty service name in --skip filter", "❌".red())
+                        format!("{} Empty service name in --skip filter", "ERROR:".red())
                     ));
                 }
             }

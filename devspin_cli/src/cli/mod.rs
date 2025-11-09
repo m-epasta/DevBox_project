@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
-
-use crate::ToolError;
+use crate::error::ToolError;
 
 #[derive(Parser)]
 #[command(name = "devspin")]
@@ -14,13 +13,13 @@ pub struct Cli {
 pub enum Commands {
     /// Start a development project
     Start(start::StartArgs),
-    // ///Stop a running project
-    // Stop(stop::StopArgs),
-    // /// List all projects
+    /// Stop a running project
+    Stop(stop::StopArgs),
+    /// List all projects
     // List(list::ListArgs),
-    // /// Show project status
-    // Status(status::StatusArgs),
-    // /// Initialize a new project
+    /// Show project status
+    Status(status::StatusArgs),
+    /// Initialize a new project
     Init(init::InitArgs),
     // /// Show project logs
     // Logs(logs::LogsArgs),
@@ -28,18 +27,17 @@ pub enum Commands {
     // Restart(restart::RestartArgs),
     // /// Manage project configuration
     // Config(config::ConfigArgs),
+    /// Show welcome message
     Welcome,
 }
 
 impl Cli {
-    pub async fn execute(&self) -> Result<(), ToolError> {
-        match &self.command {
-            Commands::Start(args) => {
-                args.execute().await
-            }
-            Commands::Init(args) => {
-                args.execute().await
-            }
+    pub async fn execute(self) -> Result<(), ToolError> {
+        match self.command {
+            Commands::Start(args) => args.execute().await,
+            Commands::Stop(args) => args.execute().await,
+            Commands::Status(args) => args.execute().await,
+            Commands::Init(args) => args.execute().await,
             Commands::Welcome => {
                 welcome_message::welcome_message();
                 Ok(())
@@ -48,9 +46,9 @@ impl Cli {
     }
 }
 
-
+// Module declarations
 pub mod start;
-pub mod stop;
+pub mod stop; 
 pub mod list;
 pub mod status;
 pub mod init;
